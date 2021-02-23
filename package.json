@@ -1,0 +1,25 @@
+{
+  "name": "uadeewebsocketserver",
+  "version": "1.0.0",
+  "description": "a WebSocket server for uadee team.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": [
+    "websocket",
+    "uadee"
+  ],
+  "author": "zhangazyt",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.17.1",
+    "fs": "0.0.1-security",
+    "mysql2": "^2.2.5",
+    "node.js": "0.0.1-security",
+    "path": "^0.12.7",
+    "sequelize": "^6.5.0",
+    "sequelize-cli": "^6.2.0",
+    "ws": "^7.4.3"
+  }
+}
