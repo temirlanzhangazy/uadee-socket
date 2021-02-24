@@ -8,10 +8,10 @@ const env = process.env.NODE_ENV || 'development';
 const config = require(__dirname + '/../config/config.json')[env];
 const db = {};
 
-let local = true;
-
+let local = true,
+    sequelize;
 if (local) {
-    let sequelize = new Sequelize('codex', 'root', 'root', {
+    sequelize = new Sequelize('codex', 'root', 'root', {
         host: 'localhost',
         port: 8889,
         dialect: 'mysql',
@@ -19,7 +19,7 @@ if (local) {
     });
 }
 else {
-    let sequelize = new Sequelize('zhangazyt_uadee', 'zhangazyt_uadee', 'Dh%t6X1R', {
+    sequelize = new Sequelize('zhangazyt_uadee', 'zhangazyt_uadee', 'Dh%t6X1R', {
         host: 'zhangazyt.beget.tech',
         dialect: 'mysql',
         logging: false
@@ -31,7 +31,7 @@ fs
             return (file.indexOf('.') !== 0) && (file !== basename) && (file.slice(-3) === '.js');
     })
     .forEach(file => {
-        const model = require(path.join(__dirname, file))(sequelize, Sequelize.DataTypes);
+        const model = require(path.join(__dirname, file))(Sequelize, sequelize, Sequelize.DataTypes);
         db[model.name] = model;
     });
 
