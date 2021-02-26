@@ -44,7 +44,7 @@ wss.on('connection', function(ws) {
                     uid = newUser.id;
                     USERS[uid] = newUser;
                     SOCKETS[uid] = ws;
-                    console.log(USERS[uid]+' entered the site.');
+                    console.log(USERS[uid].login+' entered the site.');
                     emit(ws, 'online');
                 } catch (e) {
                     // Login is wrong (normally its impossible, because client sends after auth)
@@ -183,10 +183,10 @@ wss.on('connection', function(ws) {
         }
         emit(ws, '&'+pack.query, {response});
         let after = performance.now();
-        console.log('A query was served in '+(after-before).toFixed(2)+' ms.')
+        console.log(USERS[uid].login+' made a query. Served in '+(after-before).toFixed(2)+' ms.')
     });
     ws.on('close', function(close) {
-        console.log(USERS[uid]+' leaved the site.');
+        console.log(USERS[uid].login+' leaved the site.');
         delete USERS[uid];
         delete SOCKETS[uid];
     });
