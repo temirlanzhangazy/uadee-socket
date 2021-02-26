@@ -8,7 +8,7 @@ const env = process.env.NODE_ENV || 'development';
 const config = require(__dirname + '/../config/config.json')[env];
 const db = {};
 
-let local = true,
+let local = false,
     sequelize;
 if (local) {
     sequelize = new Sequelize('codex', 'root', 'root', {
