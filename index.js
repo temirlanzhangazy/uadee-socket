@@ -44,6 +44,7 @@ wss.on('connection', function(ws) {
                     uid = newUser.id;
                     USERS[uid] = newUser;
                     SOCKETS[uid] = ws;
+                    console.log(USERS[uid]+' entered the site.');
                     emit(ws, 'online');
                 } catch (e) {
                     // Login is wrong (normally its impossible, because client sends after auth)
@@ -161,7 +162,6 @@ wss.on('connection', function(ws) {
                 await updateMe(USERS[uid]); // Sync user data with real data
                 let user = USERS[uid],
                     pc = user.conversations;
-                console.log(pc);
                 for(i in pc) {
                     if (pc[i].id == conv_id) {
                         pc[i].messagesRead = messagesRead;
@@ -186,6 +186,7 @@ wss.on('connection', function(ws) {
         console.log('A query was served in '+(after-before).toFixed(2)+' ms.')
     });
     ws.on('close', function(close) {
+        console.log(USERS[uid]+' leaved the site.');
         delete USERS[uid];
         delete SOCKETS[uid];
     });
