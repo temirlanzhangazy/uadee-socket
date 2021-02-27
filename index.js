@@ -19,7 +19,6 @@ const { conversation, message } = require('./models');
 db.sequelize.sync({alter: true}).then(async (req) => {
     console.log('Sequalize started successfully.');
 });
-
 const wss = new WebSocket.Server({server: server});
 
 let USERS = {},
@@ -89,12 +88,15 @@ wss.on('connection', function(ws) {
                     password = nanoid();
 
                 if (name.length < 1 || name.length > 144) return withResponse(ws, pack.query, 'Too long name.');
+                if (participants.length == 0) return withResponse(ws, pack.query, 'No participants.');
+
+                participants.push(owner_id);
                 let newConv = await conversation.create({
                     owner_id,
                     name,
-                    password
+                    password,
+                    participants: JSON.stringify(participants)
                 });
-                participants.push(owner_id);
                 for(i in participants) {
                     let p = await selectUser('id', participants[i]); // p -> participant
                     if (p.conversations == null) p.conversations = JSON.stringify([]);
@@ -126,14 +128,18 @@ wss.on('connection', function(ws) {
                 response.conversationsList = await conversation.findAll({
                     where: {
                         [Op.or]: conds
-                    }
+                    },
+                    order: [
+                        ['updatedAt', 'DESC']
+                    ]
                 });
             } break;
             case 'newMessage': {
                 // pack.conv_id, pack.text
                 let conv_id = pack.conv_id,
                     owner_id = uid,
-                    text = pack.text;
+                    text = pack.text,
+                    hash = pack.hash;
                 response = await message.create({
                     conv_id,
                     owner_id,
@@ -142,8 +148,9 @@ wss.on('connection', function(ws) {
                 for(i in USERS) {
                     let iu = USERS[i],
                         convs = iu.conversations;
-                    if (convs.filter(e => convs.id == conv_id)) {
-                        emit(SOCKETS[iu.id], 'updateConversation', {newMessage: response});
+
+                    if (convs.findIndex(e => e.id == conv_id) != -1) {
+                        emit(SOCKETS[iu.id], 'updateConversation', {newMessage: response, hash});
                     }
                 }
                 // Increment conversation's totalMessages
@@ -177,7 +184,11 @@ wss.on('connection', function(ws) {
                 response = await message.findAll({
                     where: {
                         conv_id
-                    }
+                    },
+                    order: [
+                        ['createdAt', 'DESC']
+                    ],
+                    limit: 200
                 });
             } break;
         }
@@ -186,7 +197,6 @@ wss.on('connection', function(ws) {
         console.log(USERS[uid].login+' made a query. Served in '+(after-before).toFixed(2)+' ms.')
     });
     ws.on('close', function(close) {
-        console.log(USERS[uid].login+' leaved the site.');
         delete USERS[uid];
         delete SOCKETS[uid];
     });

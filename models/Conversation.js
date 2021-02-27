@@ -13,20 +13,16 @@ module.exports = (Sequelize, sequelize, DataTypes) => {
         password: {
             type: DataTypes.STRING
         },
+        participants: {
+            type: DataTypes.TEXT,
+            defaultValue: '[]'
+        },
         totalMessages: {
             type: DataTypes.INTEGER,
             defaultValue: 0
-        },
-        creationTime: {
-            type: DataTypes.DATE,
-            defaultValue: Sequelize.NOW
-        },
-        updatedTime: {
-            type: DataTypes.DATE,
-            defaultValue: Sequelize.NOW
         }
     }, {
-        timestamps: false
+        timestamps: true
     });
     return conversation;
 };
