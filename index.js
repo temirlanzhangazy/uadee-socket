@@ -4,45 +4,101 @@ const { performance } = require('perf_hooks'),
     server = require('http').createServer(app),
     WebSocket = require('ws'),
     { nanoid } = require('nanoid'),
+    moment = require('moment'),
+    axios = require('axios').default,
     port = 4000;
 
-app.locals.moment = require('moment'),
-app.get('/', (req, res) => res.send('Hello World!'));
+app.get('/', (req, res) => res.send('Nothing to do here.'));
 
 server.listen(port, () => console.log(`Listening on the port ${port}`));
 
-const db = require('./models');
-const { Op, QueryTypes } = db.Sequelize;
+const db = require('./models'),
+    { Op, QueryTypes } = db.Sequelize,
+    { conversation, message } = require('./models');
 
-const { conversation, message } = require('./models');
+const wss = new WebSocket.Server({server: server});
 
+const minInterval = 800,
+    maxPenaltyPoints = 10000,
+    systemQueries = ['recaptcha_chill', 'auth', 'relation', 'readMessage'];
+
+let USERS = {},
+    SOCKETS = {},
+    SUSS = {};
+
+class Police {
+    constructor(id) {
+        this.id = id;
+        this.penaltyPoints = 0;
+        this.lastEmit = Date.now();
+    }
+    inspect() {
+        let thisMoment = Date.now(),
+            interval = thisMoment - this.lastEmit,
+            fine = minInterval-interval < 0 ? 0 : minInterval-interval,
+            pass = 0;
+        console.log(`Штрафные очки: ${this.penaltyPoints}+${fine}/${maxPenaltyPoints}`);
+        this.penaltyPoints += fine;
+        this.lastEmit = Date.now();
+        if (this.penaltyPoints >= maxPenaltyPoints) {
+            // ReCAPTCHA
+            pass = -1;
+        }
+        if (this.penaltyPoints >= maxPenaltyPoints*2) {
+            // BAN
+            pass = -2;
+        }
+        return pass;
+    }
+}
 db.sequelize.sync({alter: true}).then(async (req) => {
     console.log('Sequalize started successfully.');
 });
-const wss = new WebSocket.Server({server: server});
-
-let USERS = {},
-    SOCKETS = {};
-
 wss.on('connection', function(ws) {
     let uid = -1;
-
     ws.on('message', async function(data) {
-        let before = performance.now();
-        // WARNING, NO RETURN. ELSE USER WILL STILL WAIT FOR RESPONSE
         let pack = JSON.parse(data),
             response = null;
+        // POLICE CHECK: Hey, first of all the police check \\
+        if (pack.query != 'auth' && pack.query != 'recaptcha_chill' && uid != -1 && (systemQueries.findIndex(e => e == pack.query) == -1)) {
+            
+            let pass = SUSS[uid].inspect();
+            if (pass == -1) emit(ws, 'recaptcha');
+            if (pass == -2) {
+                emit(ws, 'recaptcha');
+                return withResponse(ws, pack.query, 'suspicious');
+            }
+        }
+        // POLICE CHECK: Okay sir, зря быканул \\
+
+        let before = performance.now();
         if (pack.query != 'auth' && uid == -1) return withResponse(ws, pack.query, 'No authorization.');
         switch(pack.query) {
+            case 'recaptcha_chill': {
+                let secret_key = '6LdIXGsaAAAAAIv8viof2Ja0SEKMXxBqbh62itoH',
+                    token = pack.token,
+                    url = `https://www.google.com/recaptcha/api/siteverify?secret=${secret_key}&response=${token}`;
+
+                axios.post(url).then((response) => {
+                    if (response.data.success) {
+                        SUSS[uid].penaltyPoints = 0;
+                    }
+                });
+            } break;
             case 'auth': {
                 // pack.login, pack.password
                 try {
                     if (USERS[pack.id] != undefined) return withResponse(ws, pack.query, 'Already signed in.');
                     let newUser = await selectUser('login', pack.login);
                     if (newUser.password != pack.password) return withResponse(ws, pack.query, 'Wrong user login or password.');
+                    // uid is global val for 'connection'
                     uid = newUser.id;
+                    // Store temporarily while online in USERS all user data
                     USERS[uid] = newUser;
+                    // Store temporarily while online socket data
                     SOCKETS[uid] = ws;
+                    // Store until server restarts Police data
+                    if (SUSS[uid] === undefined) SUSS[uid] = new Police(uid);
                     console.log(USERS[uid].login+' entered the site.');
                     emit(ws, 'online');
                 } catch (e) {
@@ -91,15 +147,20 @@ wss.on('connection', function(ws) {
                 if (participants.length == 0) return withResponse(ws, pack.query, 'No participants.');
 
                 participants.push(owner_id);
+                let members = [];
+                for(i in participants) {
+                    let rights = participants[i] == owner_id ? 1 : 0; // If it's owner then rights = 1
+                    members.push({id: participants[i], rights, enteredDate: moment()});
+                }
                 let newConv = await conversation.create({
                     owner_id,
                     name,
                     password,
-                    participants: JSON.stringify(participants)
+                    participants: JSON.stringify(members)
                 });
                 for(i in participants) {
                     let p = await selectUser('id', participants[i]); // p -> participant
-                    if (p.conversations == null) p.conversations = JSON.stringify([]);
+                    if (p.conversations == null) p.conversations = [];
 
                     let pc = p.conversations;
                     pc.push({id: newConv.id, password, messagesRead: 0});
@@ -108,12 +169,82 @@ wss.on('connection', function(ws) {
                     if (USERS[participants[i]] != undefined) { // If this user is actually online, then just update the new value
                         USERS[participants[i]].conversations = pc;
                         // Sync online user with new conversation
-                        emit(SOCKETS[participants[i]], 'newConversation');
+                        emit(SOCKETS[participants[i]], 'newConversation', {name});
                     }
 
                     const [results, metadata] = await db.sequelize.query(`UPDATE users SET conversations = ? WHERE id = ?`, {replacements: [pcJson, p.id]});
                 }
                 response = newConv;
+            } break;
+            case 'editConversation': {
+                let action = pack.action,
+                    data = pack.data,
+                    conv_id = pack.conv_id;
+                let conv = await conversation.findOne({
+                    where: {
+                        id: conv_id
+                    }
+                });                
+                switch(action) {
+                    case 'kick': {
+                        let kickId = data.kickId,
+                            participants = JSON.parse(conv.participants),
+                            haveRights = false,
+                            exists = false;
+                        checkIfHasRights:
+                        for(i in participants) {
+                            if (participants[i].id == uid && participants[i].rights == 1) {
+                                haveRights = true;
+                                break checkIfHasRights;
+                            }
+                        }
+                        if (kickId == uid) haveRights = true; // Kick myself = leave
+                        if (!haveRights) return withResponse(ws, pack.query, 'У вас нет прав.');
+                        removeProcess:
+                        for(i in participants) {
+                            if (participants[i].id == kickId) {
+                                participants.splice(i, 1);
+                                break removeProcess;
+                            }
+                        }
+                        let isThereAnyAdmin = participants.findIndex(e => e.rights == 1) != -1;
+                        if (!isThereAnyAdmin) console.log('No admins left in '+conv.name);
+
+                        conv.participants = JSON.stringify(participants);
+
+                        let p = await selectUser('id', kickId); // p -> participant
+                        if (p.conversations == null) p.conversations = [];
+                        let pc = p.conversations;
+
+                        removeFromUsersTable:
+                        for(i in pc) {
+                            if (pc[i].id == conv_id) {
+                                pc.splice(i, 1);
+                                break removeFromUsersTable;
+                            }
+                        }
+                        let pcJson = JSON.stringify(pc);
+                        
+                        const [results, metadata] = await db.sequelize.query(`UPDATE users SET conversations = ? WHERE id = ?`, {replacements: [pcJson, p.id]});
+
+                        participants.unshift({id: kickId});
+                        for(i in participants) {
+                            let op = participants[i];
+                            if (USERS[op.id] != undefined) { // If this user is actually online, then just update the new value
+                                // Sync online user with deleted conversation
+                                emit(SOCKETS[op.id], 'deletedConversation', {kickId, conv_id: conv.id, name: conv.name, isLeave: kickId == uid});
+                            }
+                        }
+                        if (kickId == uid) {
+                            newMessage(conv_id, -1, `${p.login} покинул беседу.`);
+                        }
+                        else {
+                            newMessage(conv_id, -1, `${USERS[uid].login} исключил ${p.login} из беседы.`);
+                        }
+                        response = 'kicked';
+                    } break;
+                }
+                await conv.save();
             } break;
             case 'getMyConversations': {
                 await updateMe(USERS[uid]); // Sync user data with real data
@@ -140,27 +271,7 @@ wss.on('connection', function(ws) {
                     owner_id = uid,
                     text = pack.text,
                     hash = pack.hash;
-                response = await message.create({
-                    conv_id,
-                    owner_id,
-                    text
-                });
-                for(i in USERS) {
-                    let iu = USERS[i],
-                        convs = iu.conversations;
-
-                    if (convs.findIndex(e => e.id == conv_id) != -1) {
-                        emit(SOCKETS[iu.id], 'updateConversation', {newMessage: response, hash});
-                    }
-                }
-                // Increment conversation's totalMessages
-                let conv = await conversation.findOne({
-                    where: {
-                        id: conv_id
-                    }
-                });
-                conv.totalMessages = conv.totalMessages+1;
-                await conv.save();
+                newMessage(conv_id, owner_id, text, hash, ws);
             } break;
             case 'readMessage': {
                 let conv_id = pack.conv_id,
@@ -201,9 +312,47 @@ wss.on('connection', function(ws) {
         delete SOCKETS[uid];
     });
 });
+async function newMessage(conv_id, owner_id, text, hash, ws) {
+    let haveRights = false;
+    if (ws === undefined) haveRights = true;
+    if (hash === undefined) hash = 'system';
+    // Increment conversation's totalMessages
+    let conv = await conversation.findOne({
+        where: {
+            id: conv_id
+        }
+    }),
+    participants = JSON.parse(conv.participants);
+
+    checkIfHaveRights:
+    for (i in participants) {
+        if (participants[i].id == owner_id) {
+            haveRights = true;
+            break checkIfHaveRights;
+        } 
+    }
+    if (!haveRights) return withResponse(ws, pack.query, 'У вас нет прав.');
+
+    conv.totalMessages = conv.totalMessages+1;
+
+    response = await message.create({
+        conv_id,
+        owner_id,
+        text
+    });
+    for(i in USERS) {
+        let iu = USERS[i],
+            convs = iu.conversations;
+
+        if (convs.findIndex(e => e.id == conv_id) != -1) {
+            emit(SOCKETS[iu.id], 'updateConversation', {newMessage: response, hash});
+        }
+    }
+    await conv.save();
+}
 function withResponse(ws, query, response) {
-    if (response === undefined) response = 'error';
-    emit(ws, '&'+query, {response});
+    if (response === undefined) response = 'Unknown error.';
+    emit(ws, '&'+query, {type: 'error', response});
 }
 async function updateMe(user) {
     return new Promise((resolve, reject) => {
