@@ -211,7 +211,8 @@ wss.on('connection', function(ws) {
                         if (!isThereAnyAdmin) console.log('No admins left in '+conv.name);
 
                         conv.participants = JSON.stringify(participants);
-
+                        await conv.save();
+                        
                         let p = await selectUser('id', kickId); // p -> participant
                         if (p.conversations == null) p.conversations = [];
                         let pc = p.conversations;
@@ -226,7 +227,7 @@ wss.on('connection', function(ws) {
                         let pcJson = JSON.stringify(pc);
                         
                         const [results, metadata] = await db.sequelize.query(`UPDATE users SET conversations = ? WHERE id = ?`, {replacements: [pcJson, p.id]});
-
+                        
                         participants.unshift({id: kickId});
                         for(i in participants) {
                             let op = participants[i];
@@ -244,7 +245,6 @@ wss.on('connection', function(ws) {
                         response = 'kicked';
                     } break;
                 }
-                await conv.save();
             } break;
             case 'getMyConversations': {
                 await updateMe(USERS[uid]); // Sync user data with real data
