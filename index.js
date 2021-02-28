@@ -72,7 +72,7 @@ wss.on('connection', function(ws) {
         // POLICE CHECK: Okay sir, зря быканул \\
 
         let before = performance.now();
-        if (pack.query != 'auth' && uid == -1) return withResponse(ws, pack.query, 'No authorization.');
+        if (pack.query != 'auth' && uid == -1) return withResponse(ws, pack.query, pack.query+'is declined. No authorization.');
         switch(pack.query) {
             case 'recaptcha_chill': {
                 let secret_key = '6LdIXGsaAAAAAIv8viof2Ja0SEKMXxBqbh62itoH',
@@ -212,7 +212,7 @@ wss.on('connection', function(ws) {
 
                         conv.participants = JSON.stringify(participants);
                         await conv.save();
-                        
+
                         let p = await selectUser('id', kickId); // p -> participant
                         if (p.conversations == null) p.conversations = [];
                         let pc = p.conversations;
