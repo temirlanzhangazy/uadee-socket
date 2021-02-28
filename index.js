@@ -85,14 +85,18 @@ wss.on('connection', function(ws) {
                     }
                 });
             } break;
+            case 'logout': {
+                ws.terminate();
+            } break;
             case 'auth': {
                 // pack.login, pack.password
                 try {
-                    if (USERS[pack.id] != undefined) return withResponse(ws, pack.query, 'Already signed in.');
+                    if (USERS[pack.id] != undefined) return withResponse(ws, pack.query, 'alreadysignedin');
                     let newUser = await selectUser('login', pack.login);
                     if (newUser.password != pack.password) return withResponse(ws, pack.query, 'Wrong user login or password.');
                     // uid is global val for 'connection'
                     uid = newUser.id;
+                    ws.uid = uid;
                     // Store temporarily while online in USERS all user data
                     USERS[uid] = newUser;
                     // Store temporarily while online socket data
@@ -311,6 +315,12 @@ wss.on('connection', function(ws) {
         delete USERS[uid];
         delete SOCKETS[uid];
     });
+    ws.on('pong', function() {
+        if (USERS[uid] === undefined) return;
+        ws.pingAfter = performance.now();
+        ws.pingValue = (ws.pingAfter - ws.pingBefore).toFixed();
+        emit(ws, 'pingValue', {ping: ws.pingValue});
+    });
 });
 async function newMessage(conv_id, owner_id, text, hash, ws) {
     let haveRights = false;
@@ -388,7 +398,6 @@ async function selectUser(type, login) {
         });
     });
 }
-
 function emit(ws, query, data) {
     let pack = {query};
     for(let i in data) {
@@ -396,3 +405,12 @@ function emit(ws, query, data) {
     }
     ws.send(JSON.stringify(pack));
 }
+
+// Ping check
+const globalEachSecond = setInterval(() => {
+    wss.clients.forEach((ws) => {
+        if (ws.uid === undefined) return;
+        ws.ping();
+        ws.pingBefore = performance.now();
+    });
+}, 1000);
