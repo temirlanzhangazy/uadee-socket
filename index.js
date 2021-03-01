@@ -20,12 +20,27 @@ const wss = new WebSocket.Server({server: server});
 
 const minInterval = 800,
     maxPenaltyPoints = 10000,
-    systemQueries = ['recaptcha_chill', 'auth', 'relation', 'readMessage'];
+    systemQueries = ['recaptcha_chill', 'auth', 'relation', 'readMessage', 'figureBoard'];
 
 let USERS = {},
     SOCKETS = {},
-    SUSS = {};
+    SUSS = {},
+    BOARDS = {};
 
+class Board {
+    constructor(id) {
+        this.id = id;
+        this.owner_id = id;
+        this.members = [];
+        this.newMember(this.owner_id);
+    }
+    newMember(user_id) {
+        this.members.push({
+            id: user_id,
+            paths: []
+        });
+    }
+}
 class Police {
     constructor(id) {
         this.id = id;
@@ -190,6 +205,49 @@ wss.on('connection', function(ws) {
                     }
                 });                
                 switch(action) {
+                    case 'add': {
+                        let addIds = data.addIds,
+                            participants = JSON.parse(conv.participants),
+                            haveRights = false,
+                            exists = false;
+                        checkIfHasRights:
+                        for(i in participants) {
+                            if (participants[i].id == uid && participants[i].rights == 1) {
+                                haveRights = true;
+                                break checkIfHasRights;
+                            }
+                        }
+
+                        if (!haveRights) return withResponse(ws, pack.query, 'У вас нет прав.');
+
+                        let addMembers = [];
+                        for(i in addIds) {
+                            if (addIds[i] == uid) continue;
+                            participants.push({id: addIds[i], rights: 0, enteredDate: moment()});
+
+                            let p = await selectUser('id', addIds[i]); // p -> participant
+                            addMembers.push({id: p.id, login: p.login, fullname: p.fullname});
+                            if (p.conversations == null) p.conversations = [];
+                            let pc = p.conversations;
+                            pc.push({id: conv.id, password: conv.password, messagesRead: 0});
+                            let pcJson = JSON.stringify(pc);
+                            const [results, metadata] = await db.sequelize.query(`UPDATE users SET conversations = ? WHERE id = ?`, {replacements: [pcJson, p.id]});
+                            newMessage(conv_id, -1, `${USERS[uid].login} добавил ${p.login} в беседу.`);
+                        }
+                        conv.participants = JSON.stringify(participants);
+                        await conv.save();
+                        
+                        for(i in participants) {
+                            let op = participants[i];
+                            if (USERS[op.id] != undefined) { // If this user is actually online, then just update the new value
+                                // Sync online user with new conversation
+                                for(j in addMembers) {
+                                    emit(SOCKETS[op.id], 'addedConversation', {addId: addMembers[j].id, conv_id: conv.id, name: conv.name, addLogin: addMembers[j].login, addFullname: addMembers[j].fullname});
+                                }
+                            }
+                        }
+                        response = 'added';
+                    } break;
                     case 'kick': {
                         let kickId = data.kickId,
                             participants = JSON.parse(conv.participants),
@@ -306,6 +364,56 @@ wss.on('connection', function(ws) {
                     limit: 200
                 });
             } break;
+            case 'newBoard': {
+                BOARDS[uid] = new Board(uid);
+                response = BOARDS[uid];
+            } break;
+            case 'inviteBoard': {
+                let list = pack.list,
+                    board = BOARDS[uid],
+                    newMembers = [];
+                for(i in list) {
+                    if (board.members.findIndex(e => e.id == list[i]) == -1) {
+                        if (USERS[list[i]] != undefined) {
+                            board.newMember(list[i]);
+                            newMembers.push(list[i]);
+                        }
+                    }
+                }
+                for(i in newMembers) {
+                    emit(SOCKETS[newMembers[i]], 'newBoard', {board});
+                }
+                for(i in board.members) {
+                    if (newMembers.findIndex(e => e == board.members[i].id) != -1) continue;
+                    if (USERS[board.members[i].id] != undefined) {
+                        emit(SOCKETS[board.members[i].id], 'newBoardMember', {newMembers});
+                    }
+                }
+                response = board;
+            } break;
+            case 'figureBoard': {
+                let board_id = pack.board_id,
+                    x = pack.x,
+                    y = pack.y,
+                    beginPath = pack.beginPath;
+
+                for(i in BOARDS[board_id].members) {
+                    if (BOARDS[board_id].members[i].id == uid) {
+                        if (beginPath != undefined) {
+                            BOARDS[board_id].members[i].paths.push({x: -1});
+                        }
+                        else {
+                            BOARDS[board_id].members[i].paths.push({x, y});
+                        }
+                    }
+                }
+                for(i in BOARDS[board_id].members) {
+                    let member = BOARDS[board_id].members[i];
+                    if (USERS[member.id] != undefined) {
+                        emit(SOCKETS[member.id], 'figureBoard', {member_id: uid, x, y});
+                    }
+                }
+            } break;
         }
         emit(ws, '&'+pack.query, {response});
         let after = performance.now();
@@ -318,7 +426,7 @@ wss.on('connection', function(ws) {
     ws.on('pong', function() {
         if (USERS[uid] === undefined) return;
         ws.pingAfter = performance.now();
-        ws.pingValue = (ws.pingAfter - ws.pingBefore).toFixed();
+        ws.pingValue = (ws.pingAfter - ws.pingBefore).toFixed(1);
         emit(ws, 'pingValue', {ping: ws.pingValue});
     });
 });
@@ -341,7 +449,7 @@ async function newMessage(conv_id, owner_id, text, hash, ws) {
             break checkIfHaveRights;
         } 
     }
-    if (!haveRights) return withResponse(ws, pack.query, 'У вас нет прав.');
+    if (!haveRights) return withResponse(ws, 'newMessage', 'У вас нет прав.');
 
     conv.totalMessages = conv.totalMessages+1;
 
@@ -413,4 +521,4 @@ const globalEachSecond = setInterval(() => {
         ws.ping();
         ws.pingBefore = performance.now();
     });
-}, 1000);
+}, 2000);
