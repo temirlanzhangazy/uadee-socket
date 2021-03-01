@@ -20,7 +20,7 @@ const wss = new WebSocket.Server({server: server});
 
 const minInterval = 800,
     maxPenaltyPoints = 10000,
-    systemQueries = ['recaptcha_chill', 'auth', 'relation', 'readMessage', 'figureBoard'];
+    systemQueries = ['recaptcha_chill', 'auth', 'relation', 'readMessage', 'figureBoard', 'cursorMove'];
 
 let USERS = {},
     SOCKETS = {},
@@ -35,10 +35,14 @@ class Board {
         this.newMember(this.owner_id);
     }
     newMember(user_id) {
-        this.members.push({
+        let index = this.members.push({
             id: user_id,
-            paths: []
+            color: '#'+(0x1000000+Math.random()*0xffffff).toString(16).substr(1,6),
+            paths: [],
+            mouseX: 0,
+            mouseY: 0
         });
+        return this.members[index-1];
     }
 }
 class Police {
@@ -366,25 +370,30 @@ wss.on('connection', function(ws) {
             } break;
             case 'newBoard': {
                 BOARDS[uid] = new Board(uid);
+                USERS[uid].board = BOARDS[uid].id;
+                
                 response = BOARDS[uid];
             } break;
             case 'inviteBoard': {
                 let list = pack.list,
-                    board = BOARDS[uid],
+                    board_id = pack.board_id,
+                    board = BOARDS[board_id],
                     newMembers = [];
                 for(i in list) {
                     if (board.members.findIndex(e => e.id == list[i]) == -1) {
-                        if (USERS[list[i]] != undefined) {
-                            board.newMember(list[i]);
-                            newMembers.push(list[i]);
+                        if (USERS[list[i]] != undefined && USERS[list[i]].board === undefined) {
+                            let val = board.newMember(list[i]);
+                            newMembers.push(val);
+
+                            USERS[list[i]].board = board.id;
                         }
                     }
                 }
                 for(i in newMembers) {
-                    emit(SOCKETS[newMembers[i]], 'newBoard', {board});
+                    emit(SOCKETS[newMembers[i].id], 'newBoard', {board});
                 }
                 for(i in board.members) {
-                    if (newMembers.findIndex(e => e == board.members[i].id) != -1) continue;
+                    if (newMembers.findIndex(e => e.id == board.members[i].id) != -1) continue;
                     if (USERS[board.members[i].id] != undefined) {
                         emit(SOCKETS[board.members[i].id], 'newBoardMember', {newMembers});
                     }
@@ -394,17 +403,11 @@ wss.on('connection', function(ws) {
             case 'figureBoard': {
                 let board_id = pack.board_id,
                     x = pack.x,
-                    y = pack.y,
-                    beginPath = pack.beginPath;
+                    y = pack.y;
 
                 for(i in BOARDS[board_id].members) {
                     if (BOARDS[board_id].members[i].id == uid) {
-                        if (beginPath != undefined) {
-                            BOARDS[board_id].members[i].paths.push({x: -1});
-                        }
-                        else {
-                            BOARDS[board_id].members[i].paths.push({x, y});
-                        }
+                        BOARDS[board_id].members[i].paths.push({x, y});
                     }
                 }
                 for(i in BOARDS[board_id].members) {
@@ -414,12 +417,46 @@ wss.on('connection', function(ws) {
                     }
                 }
             } break;
+            case 'cursorMove': {
+                let board_id = pack.board_id,
+                    x = pack.x,
+                    y = pack.y;
+
+                for(i in BOARDS[board_id].members) {
+                    if (BOARDS[board_id].members[i].id == uid) {
+                        BOARDS[board_id].members[i].mouseX = x;
+                        BOARDS[board_id].members[i].mouseY = y;
+                    }
+                }
+                for(i in BOARDS[board_id].members) {
+                    let member = BOARDS[board_id].members[i];
+                    if (USERS[member.id] != undefined) {
+                        emit(SOCKETS[member.id], 'cursorMove', {member_id: uid, x, y});
+                    }
+                }
+            } break;
         }
         emit(ws, '&'+pack.query, {response});
         let after = performance.now();
         console.log(USERS[uid].login+' made a query. Served in '+(after-before).toFixed(2)+' ms.')
     });
     ws.on('close', function(close) {
+        if (USERS[uid].board != undefined) { // And -1 maybe if he was somewhere, then left
+            let board_id = USERS[uid].board;
+            // Let's check his boards array
+            for(i in BOARDS[board_id].members) {
+                if (BOARDS[board_id].members[i].id == uid) { // Oh, this is him
+                    BOARDS[board_id].members.splice(i, 1); // Delete him
+
+                    for(j in BOARDS[board_id].members) { // Notify everyone
+                        let member = BOARDS[board_id].members[j];
+                        if (USERS[member.id] === undefined) continue; // If offline, then skip
+                        emit(SOCKETS[member.id], 'leftBoardMember', {uid});
+                    }
+                    break;
+                }
+            }
+        }
         delete USERS[uid];
         delete SOCKETS[uid];
     });
