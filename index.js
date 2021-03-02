@@ -24,13 +24,14 @@ const minInterval = 800,
 
 let USERS = {},
     SOCKETS = {},
-    SUSS = {},
+    STOCK = {},
     BOARDS = {};
 
 class Board {
     constructor(id) {
         this.id = id;
         this.owner_id = id;
+        this.size = {width: 1920, height: 1080};
         this.members = [];
         this.newMember(this.owner_id);
     }
@@ -81,7 +82,7 @@ wss.on('connection', function(ws) {
         // POLICE CHECK: Hey, first of all the police check \\
         if (pack.query != 'auth' && pack.query != 'recaptcha_chill' && uid != -1 && (systemQueries.findIndex(e => e == pack.query) == -1)) {
             
-            let pass = SUSS[uid].inspect();
+            let pass = STOCK[uid].police.inspect();
             if (pass == -1) emit(ws, 'recaptcha');
             if (pass == -2) {
                 emit(ws, 'recaptcha');
@@ -100,7 +101,7 @@ wss.on('connection', function(ws) {
 
                 axios.post(url).then((response) => {
                     if (response.data.success) {
-                        SUSS[uid].penaltyPoints = 0;
+                        STOCK[uid].police.penaltyPoints = 0;
                     }
                 });
             } break;
@@ -121,7 +122,12 @@ wss.on('connection', function(ws) {
                     // Store temporarily while online socket data
                     SOCKETS[uid] = ws;
                     // Store until server restarts Police data
-                    if (SUSS[uid] === undefined) SUSS[uid] = new Police(uid);
+                    if (STOCK[uid] === undefined) {
+                        STOCK[uid] = {
+                            boardInvites: [],
+                            police: new Police(uid)
+                        };
+                    }
                     console.log(USERS[uid].login+' entered the site.');
                     emit(ws, 'online');
                 } catch (e) {
@@ -374,46 +380,115 @@ wss.on('connection', function(ws) {
                 
                 response = BOARDS[uid];
             } break;
+            case 'leaveBoard': {
+                if (USERS[uid].board == undefined) return withResponse(ws, pack.query, 'Вы не состоите ни в какой комнате.');
+                let board_id = USERS[uid].board,
+                    board = BOARDS[board_id];
+                
+                USERS[uid].board = undefined;
+                if (board === undefined) { // If board was closed, will it be undefined?
+                    return withResponse(ws, pack.query, 'Комната не существует или уже закрыта.');
+                }
+                if (board.members.findIndex(e => e.id == uid) == -1) return withResponse(ws, pack.query, 'Вы не состоите в этой комнате.');
+                board.members.splice(board.members.findIndex(e => e.id == uid), 1);
+
+                for(i in board.members) {
+                    let member = board.members[i];
+                    if (USERS[member.id] != undefined) {
+                        emit(SOCKETS[member.id], 'leftBoardMember', {uid});
+                    }
+                }
+                response = 'ok';
+            } break;
             case 'inviteBoard': {
                 let list = pack.list,
                     board_id = pack.board_id,
-                    board = BOARDS[board_id],
-                    newMembers = [];
+                    board = BOARDS[board_id];
                 for(i in list) {
-                    if (board.members.findIndex(e => e.id == list[i]) == -1) {
-                        if (USERS[list[i]] != undefined && USERS[list[i]].board === undefined) {
-                            let val = board.newMember(list[i]);
-                            newMembers.push(val);
-
-                            USERS[list[i]].board = board.id;
+                    if (STOCK[list[i]] === undefined) STOCK[list[i]] = {boardInvites: []};
+                    if ((board.members.findIndex(e => e.id == list[i]) == -1) &&  // If the board does not already have such member
+                    STOCK[list[i]].boardInvites.findIndex(e => e.inviter_id == uid) == -1) { // and we haven't invited him already
+                        STOCK[list[i]].boardInvites.push({inviter_id: uid, inviter_login: USERS[uid].login, board_id});
+                        if (USERS[list[i]] != undefined) {
+                            emit(SOCKETS[list[i]], 'newBoardInvitation', {inviter_id: uid, inviter_login: USERS[uid].login, board_id});
                         }
-                    }
-                }
-                for(i in newMembers) {
-                    emit(SOCKETS[newMembers[i].id], 'newBoard', {board});
-                }
-                for(i in board.members) {
-                    if (newMembers.findIndex(e => e.id == board.members[i].id) != -1) continue;
-                    if (USERS[board.members[i].id] != undefined) {
-                        emit(SOCKETS[board.members[i].id], 'newBoardMember', {newMembers});
                     }
                 }
                 response = board;
             } break;
+            case 'getMyBoardInvitations': {
+                if (STOCK[uid] === undefined) return withResponse(ws, pack.query, 'Вы не авторизованы.');
+                response = STOCK[uid]?.boardInvites;
+            } break;
+            case 'respondBoardInvitation': {
+                if (STOCK[uid] === undefined) return withResponse(ws, pack.query, 'Вы не авторизованы.');
+                let status = pack.status,
+                    board_id = pack.board_id,
+                    board = BOARDS[board_id];
+                
+                if (board === undefined) { // If board was closed, will it be undefined?
+                    return withResponse(ws, pack.query, 'Комната не существует или уже закрыта.');
+                }
+                if (USERS[uid].board != undefined && status == 1) return withResponse(ws, pack.query, 'Сначала покиньте текущую комнату.');
+                tryToFindSuchInvitation:
+                for(i in STOCK[uid].boardInvites) {
+                    let inv = STOCK[uid].boardInvites[i];
+                    if (inv.board_id == board_id) {
+                        // Found, accepted. Now decide
+                        if (status == 1) {
+                            let val = board.newMember(uid);
+                            USERS[uid].board = board.id;
+                            emit(SOCKETS[uid], 'newBoard', {board});
+                            response = 'ok';
+                            for(j in board.members) {
+                                if (board.members[j].id == uid) continue;
+                                if (USERS[board.members[j].id] != undefined) {
+                                    emit(SOCKETS[board.members[j].id], 'newBoardMember', {newMembers: [val]});
+                                }
+                            }
+                        }
+                        else {
+                            emit(SOCKETS[inv.inviter_id], 'announce', {type: 'I', message: `${USERS[uid].login} отказался присоединиться в комнату.`});
+                            response = 'ok';
+                        }
+                        STOCK[uid].boardInvites.splice(i, 1);
+                        break tryToFindSuchInvitation;
+                    }
+                }
+            } break;
             case 'figureBoard': {
                 let board_id = pack.board_id,
+                    type = pack.type,
+                    action = pack.action,
                     x = pack.x,
                     y = pack.y;
 
+                if (BOARDS[board_id] === undefined) return;
+
                 for(i in BOARDS[board_id].members) {
                     if (BOARDS[board_id].members[i].id == uid) {
-                        BOARDS[board_id].members[i].paths.push({x, y});
+                        BOARDS[board_id].members[i].paths.push({type, action, x, y});
                     }
                 }
                 for(i in BOARDS[board_id].members) {
                     let member = BOARDS[board_id].members[i];
                     if (USERS[member.id] != undefined) {
-                        emit(SOCKETS[member.id], 'figureBoard', {member_id: uid, x, y});
+                        emit(SOCKETS[member.id], 'figureBoard', {member_id: uid, type, action, x, y});
+                    }
+                }
+            } break;
+            case 'boardPathUpdate': {
+                let board_id = pack.board_id,
+                    paths = pack.paths,
+                    board = BOARDS[board_id];
+                if (board === undefined) return withResponse(ws, pack.query, 'Комната не существует или уже закрыта.');
+                let index = board.members.findIndex(e => e.id == uid);
+                if (index == -1) return withResponse(ws, pack.query, 'Вы не состоите в этой комнате.');
+                board.members[index].paths = paths;
+                for(i in board.members) {
+                    let member = board.members[i];
+                    if (USERS[member.id] != undefined) {
+                        emit(SOCKETS[member.id], 'boardMemberPathUpdate', {member_id: uid, paths});
                     }
                 }
             } break;
@@ -421,6 +496,8 @@ wss.on('connection', function(ws) {
                 let board_id = pack.board_id,
                     x = pack.x,
                     y = pack.y;
+                
+                if (BOARDS[board_id] === undefined) return;
 
                 for(i in BOARDS[board_id].members) {
                     if (BOARDS[board_id].members[i].id == uid) {
@@ -438,10 +515,10 @@ wss.on('connection', function(ws) {
         }
         emit(ws, '&'+pack.query, {response});
         let after = performance.now();
-        console.log(USERS[uid].login+' made a query. Served in '+(after-before).toFixed(2)+' ms.')
+        console.log(USERS[uid]?.login+' made a query. Served in '+(after-before).toFixed(2)+' ms.')
     });
     ws.on('close', function(close) {
-        if (USERS[uid].board != undefined) { // And -1 maybe if he was somewhere, then left
+        if (USERS[uid]?.board != undefined) { // And -1 maybe if he was somewhere, then left
             let board_id = USERS[uid].board;
             // Let's check his boards array
             for(i in BOARDS[board_id].members) {
