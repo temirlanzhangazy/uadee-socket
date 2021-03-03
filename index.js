@@ -413,6 +413,10 @@ wss.on('connection', function(ws) {
                         emit(SOCKETS[member.id], 'leftBoardMember', {uid});
                     }
                 }
+                // Temporary
+                if (BOARDS[board_id].members.length == 0) {
+                    delete BOARDS[board_id];
+                }
                 response = 'ok';
             } break;
             case 'inviteBoard': {
@@ -573,11 +577,14 @@ wss.on('connection', function(ws) {
             for(i in BOARDS[board_id].members) {
                 if (BOARDS[board_id].members[i].id == uid) { // Oh, this is him
                     BOARDS[board_id].members.splice(i, 1); // Delete him
-
                     for(j in BOARDS[board_id].members) { // Notify everyone
                         let member = BOARDS[board_id].members[j];
                         if (USERS[member.id] === undefined) continue; // If offline, then skip
                         emit(SOCKETS[member.id], 'leftBoardMember', {uid});
+                    }
+                    // Temporary
+                    if (BOARDS[board_id].members.length == 0) {
+                        delete BOARDS[board_id];
                     }
                     break;
                 }
