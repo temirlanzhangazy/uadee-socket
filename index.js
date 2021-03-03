@@ -8,6 +8,8 @@ const { performance } = require('perf_hooks'),
     axios = require('axios').default,
     port = 4000;
 
+const randomColor = require('./scripts/randomcolor');
+
 app.get('/', (req, res) => res.send('Nothing to do here.'));
 
 server.listen(port, () => console.log(`Listening on the port ${port}`));
@@ -31,14 +33,15 @@ class Board {
     constructor(id) {
         this.id = id;
         this.owner_id = id;
-        this.size = {width: 1920, height: 1080};
+        this.owner_login = USERS[id].login;
+        this.size = {width: 4000, height: 4000};
         this.members = [];
         this.newMember(this.owner_id);
     }
     newMember(user_id) {
         let index = this.members.push({
             id: user_id,
-            color: '#'+(0x1000000+Math.random()*0xffffff).toString(16).substr(1,6),
+            color: randomColor.parseDarkHex(4),
             paths: [],
             mouseX: 0,
             mouseY: 0
@@ -81,12 +84,16 @@ wss.on('connection', function(ws) {
             response = null;
         // POLICE CHECK: Hey, first of all the police check \\
         if (pack.query != 'auth' && pack.query != 'recaptcha_chill' && uid != -1 && (systemQueries.findIndex(e => e == pack.query) == -1)) {
-            
-            let pass = STOCK[uid].police.inspect();
-            if (pass == -1) emit(ws, 'recaptcha');
-            if (pass == -2) {
-                emit(ws, 'recaptcha');
-                return withResponse(ws, pack.query, 'suspicious');
+            let pass = STOCK[uid]?.police?.inspect();
+            switch (pass) {
+                case -1: emit(ws, 'recaptcha'); break;
+                case -2:
+                    emit(ws, 'recaptcha');
+                    return withResponse(ws, pack.query, 'suspicious');
+                break;
+                case undefined:
+                    return withResponse(ws, pack.query, 'No STOCK inspection.');
+                break;
             }
         }
         // POLICE CHECK: Okay sir, зря быканул \\
@@ -380,6 +387,14 @@ wss.on('connection', function(ws) {
                 
                 response = BOARDS[uid];
             } break;
+            case 'getBoards': {
+                let board_list = [];
+                for(i in BOARDS) {
+                    let board = BOARDS[i];
+                    board_list.push({id: board.id, login: board.owner_login});
+                }
+                response = board_list;
+            } break;
             case 'leaveBoard': {
                 if (USERS[uid].board == undefined) return withResponse(ws, pack.query, 'Вы не состоите ни в какой комнате.');
                 let board_id = USERS[uid].board,
@@ -430,6 +445,14 @@ wss.on('connection', function(ws) {
                     return withResponse(ws, pack.query, 'Комната не существует или уже закрыта.');
                 }
                 if (USERS[uid].board != undefined && status == 1) return withResponse(ws, pack.query, 'Сначала покиньте текущую комнату.');
+                
+                // IF BOARD IS GLOBAL, then OK
+                if (true) {
+                    let ind = STOCK[uid].boardInvites.findIndex(e => e.board_id == board_id);
+                    if (ind == -1) {
+                        STOCK[uid].boardInvites.push({board_id});
+                    }
+                }
                 tryToFindSuchInvitation:
                 for(i in STOCK[uid].boardInvites) {
                     let inv = STOCK[uid].boardInvites[i];
@@ -477,7 +500,7 @@ wss.on('connection', function(ws) {
                     }
                 }
             } break;
-            case 'boardPathUpdate': {
+            case 'boardPathUpdate': { // Emergency update full path
                 let board_id = pack.board_id,
                     paths = pack.paths,
                     board = BOARDS[board_id];
@@ -492,23 +515,49 @@ wss.on('connection', function(ws) {
                     }
                 }
             } break;
+            case 'boardAction': {
+                let board_id = pack.board_id,
+                    board = BOARDS[board_id],
+                    action = pack.action;
+                if (board === undefined) return withResponse(ws, pack.query, 'Комната не существует или уже закрыта.');
+                let index = board.members.findIndex(e => e.id == uid);
+                if (index == -1) return withResponse(ws, pack.query, 'Вы не состоите в этой комнате.');
+                switch(action) {
+                    case 'undo':
+                        let member = board.members[index];
+                        let paths = member.paths.slice().reverse();
+                        let firstEnd = paths.findIndex(x => x.action == 'end');
+                        paths.splice(firstEnd, 1);
+                        let secondEnd = paths.findIndex(x => x.action == 'end');
+                        if (secondEnd == -1) secondEnd = member.paths.length;
+                        paths.splice(firstEnd, secondEnd);
+                        member.paths = paths.reverse();
+                        for(i in board.members) {
+                            let member = board.members[i];
+                            if (USERS[member.id] != undefined) {
+                                emit(SOCKETS[member.id], 'boardAction', {member_id: uid, action: 'undo'});
+                            }
+                        }
+                    break;
+                }
+            } break;
             case 'cursorMove': {
                 let board_id = pack.board_id,
                     x = pack.x,
-                    y = pack.y;
+                    y = pack.y,
+                    offsetX = pack.offsetX,
+                    offsetY = pack.offsetY;
                 
                 if (BOARDS[board_id] === undefined) return;
+                let index = BOARDS[board_id].members.findIndex(e => e.id == uid);
+                if (index == -1) return;
+                BOARDS[board_id].members[index].mouseX = x;
+                BOARDS[board_id].members[index].mouseY = y;
 
-                for(i in BOARDS[board_id].members) {
-                    if (BOARDS[board_id].members[i].id == uid) {
-                        BOARDS[board_id].members[i].mouseX = x;
-                        BOARDS[board_id].members[i].mouseY = y;
-                    }
-                }
                 for(i in BOARDS[board_id].members) {
                     let member = BOARDS[board_id].members[i];
                     if (USERS[member.id] != undefined) {
-                        emit(SOCKETS[member.id], 'cursorMove', {member_id: uid, x, y});
+                        emit(SOCKETS[member.id], 'cursorMove', {member_id: uid, x, y, offsetX, offsetY});
                     }
                 }
             } break;
@@ -635,4 +684,4 @@ const globalEachSecond = setInterval(() => {
         ws.ping();
         ws.pingBefore = performance.now();
     });
-}, 2000);
+}, 5000);
