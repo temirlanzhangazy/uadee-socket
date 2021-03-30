@@ -5,9 +5,11 @@ const { performance } = require('perf_hooks'),
     WebSocket = require('ws'),
     { nanoid } = require('nanoid'),
     moment = require('moment'),
+    osu = require('node-os-utils'),
     axios = require('axios').default,
     port = 4000;
 
+const { resolve } = require('path');
 const randomColor = require('./scripts/randomcolor');
 
 app.get('/', (req, res) => res.send('Nothing to do here.'));
@@ -28,6 +30,8 @@ let USERS = {},
     SOCKETS = {},
     STOCK = {},
     BOARDS = {};
+
+let VOLS = [];
 
 class Board {
     constructor(id) {
@@ -139,7 +143,8 @@ wss.on('connection', function(ws) {
                     emit(ws, 'online');
                 } catch (e) {
                     // Login is wrong (normally its impossible, because client sends after auth)
-                    ws.terminate();
+                    return withResponse(ws, pack.query, 'wronglogin');
+                    //ws.terminate();
                 }
             } break;
             case 'relation': {
@@ -349,8 +354,13 @@ wss.on('connection', function(ws) {
                 let conv_id = pack.conv_id,
                     owner_id = uid,
                     text = pack.text,
-                    hash = pack.hash;
-                newMessage(conv_id, owner_id, text, hash, ws);
+                    hash = pack.hash,
+                    otherData = {};
+                
+                if (pack.type != undefined) {
+                    otherData = {type: pack.type, filename: pack.filename};
+                }
+                newMessage(conv_id, owner_id, text, hash, ws, otherData);
             } break;
             case 'readMessage': {
                 let conv_id = pack.conv_id,
@@ -565,6 +575,50 @@ wss.on('connection', function(ws) {
                     }
                 }
             } break;
+            case 'adminBroadcast': {
+                let message = pack.message;
+                await updateMe(USERS[uid]);
+                if (USERS[uid].status < 1) return withResponse(ws, pack.query, 'У вас нет прав.');
+                for(i in USERS) {
+                    emit(SOCKETS[USERS[i].id], 'announce', {type: 'I', admin_id: uid, message: `Администратор ${USERS[uid].login}: ${message}`});
+                }
+            } break;
+            // Peers
+            case 'peerConnect': {
+                let peer_id = pack.id;
+                USERS[uid].peer = peer_id;
+            } break;
+            case 'peersGet': {
+                let users_list = pack.users,
+                    peers = [];
+                for(i in users_list) {
+                    if (USERS[users_list[i]] != undefined) {
+                        peers.push({peer: USERS[users_list[i]].peer, user_id: users_list[i]});
+                    }
+                }
+                response = peers;
+            } break;
+            case 'cpuInfo': {
+                let cpu = osu.cpu,
+                    mem = osu.mem,
+                    cpuData = {};
+                await cpu.usage().then(info => {cpuData.usage = info});
+                await mem.info().then(info => {cpuData.mem = info});
+                response = cpuData;
+            } break;
+            // Volunteers
+            case 'volAuth': {
+                let index = VOLS.findIndex(e => e.id == uid);
+                if (index != -1) return withResponse(ws, pack.query, 'already');
+                VOLS.push({id: uid, peer_id: pack.peer_id});
+                console.log(VOLS)
+                response = 'hello';
+            } break;
+            case 'getFreeVOL': {
+                console.log(VOLS)
+                if (VOLS.length == 0) return withResponse(ws, pack.query, 'Нет свободных волонтеров.');
+                response = VOLS[0];
+            } break;
         }
         emit(ws, '&'+pack.query, {response});
         let after = performance.now();
@@ -592,6 +646,10 @@ wss.on('connection', function(ws) {
         }
         delete USERS[uid];
         delete SOCKETS[uid];
+
+        // Delete VOLS
+        let vols_index = VOLS.findIndex(e => e.id == uid);
+        if (vols_index != -1) VOLS.splice(vols_index, 1);
     });
     ws.on('pong', function() {
         if (USERS[uid] === undefined) return;
@@ -600,10 +658,12 @@ wss.on('connection', function(ws) {
         emit(ws, 'pingValue', {ping: ws.pingValue});
     });
 });
-async function newMessage(conv_id, owner_id, text, hash, ws) {
+async function newMessage(conv_id, owner_id, text, hash, ws, otherData) {
     let haveRights = false;
     if (ws === undefined) haveRights = true;
     if (hash === undefined) hash = 'system';
+    if (otherData === undefined) otherData = {type: 'message'};
+
     // Increment conversation's totalMessages
     let conv = await conversation.findOne({
         where: {
@@ -626,7 +686,8 @@ async function newMessage(conv_id, owner_id, text, hash, ws) {
     response = await message.create({
         conv_id,
         owner_id,
-        text
+        text,
+        otherData: JSON.stringify(otherData)
     });
     for(i in USERS) {
         let iu = USERS[i],
