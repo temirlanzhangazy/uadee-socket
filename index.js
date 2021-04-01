@@ -150,7 +150,7 @@ wss.on('connection', function(ws) {
             case 'relation': {
                 let user = USERS[uid],
                     user_b = USERS[pack.user_b];
-                if (user_b === undefined) return withResponse(ws, pack.query, 'Offline.'); // If he is offline
+                if (user_b === undefined) return withResponse(ws, pack.query, ''); // If he is offline
 
                 let relationStatus = pack.relationStatus,
                     message;
@@ -182,6 +182,7 @@ wss.on('connection', function(ws) {
                     owner_id = user.id,
                     name = pack.name,
                     participants = pack.participants,
+                    private = pack.private,
                     password = nanoid();
 
                 if (name.length < 1 || name.length > 144) return withResponse(ws, pack.query, 'Too long name.');
@@ -191,7 +192,18 @@ wss.on('connection', function(ws) {
                 let members = [];
                 for(i in participants) {
                     let rights = participants[i] == owner_id ? 1 : 0; // If it's owner then rights = 1
-                    members.push({id: participants[i], rights, enteredDate: moment()});
+                    members.push({id: participants[i], rights});
+                }
+                if (private) {
+                    let conv = await conversation.count({
+                        where: {
+                            participants: JSON.stringify(members)
+                        }
+                    });
+                    console.log(conv);
+                    if (conv > 0) {
+                        return withResponse(ws, pack.query, 'Already opened.');
+                    }
                 }
                 let newConv = await conversation.create({
                     owner_id,
@@ -358,7 +370,7 @@ wss.on('connection', function(ws) {
                     otherData = {};
                 
                 if (pack.type != undefined) {
-                    otherData = {type: pack.type, filename: pack.filename};
+                    otherData = {type: pack.type, filename: pack.filename, originalname: pack.originalname, filesize: pack.filesize};
                 }
                 newMessage(conv_id, owner_id, text, hash, ws, otherData);
             } break;
