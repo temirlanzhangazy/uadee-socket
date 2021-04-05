@@ -7,7 +7,8 @@ const { performance } = require('perf_hooks'),
     moment = require('moment'),
     osu = require('node-os-utils'),
     axios = require('axios').default,
-    port = 4000;
+    port = 4000,
+    { Chess } = require('chess.js');
 
 const { resolve } = require('path');
 const randomColor = require('./scripts/randomcolor');
@@ -24,7 +25,7 @@ const wss = new WebSocket.Server({server: server});
 
 const minInterval = 800,
     maxPenaltyPoints = 10000,
-    systemQueries = ['recaptcha_chill', 'auth', 'relation', 'readMessage', 'figureBoard', 'cursorMove'];
+    systemQueries = ['recaptcha_chill', 'auth', 'relation', 'readMessage', 'figureBoard', 'cursorMove', 'chess']; // Chess <- косяк
 
 let USERS = {},
     SOCKETS = {},
@@ -33,6 +34,17 @@ let USERS = {},
 
 let VOLS = [];
 
+let CHESSMATCHES = [];
+class ChessMatch {
+    constructor(id) {
+        this.id = id;
+        this.players = [];
+        this.chess = new Chess();
+    }
+    board() {
+        return this.chess.board();
+    }
+}
 class Board {
     constructor(id) {
         this.id = id;
@@ -122,7 +134,7 @@ wss.on('connection', function(ws) {
             case 'auth': {
                 // pack.login, pack.password
                 try {
-                    if (USERS[pack.id] != undefined) return withResponse(ws, pack.query, 'alreadysignedin');
+                    //if (USERS[pack.id] != undefined) return withResponse(ws, pack.query, 'alreadysignedin');
                     let newUser = await selectUser('login', pack.login);
                     if (newUser.password != pack.password) return withResponse(ws, pack.query, 'Wrong user login or password.');
                     // uid is global val for 'connection'
@@ -131,7 +143,8 @@ wss.on('connection', function(ws) {
                     // Store temporarily while online in USERS all user data
                     USERS[uid] = newUser;
                     // Store temporarily while online socket data
-                    SOCKETS[uid] = ws;
+                    if (SOCKETS[uid] === undefined) SOCKETS[uid] = [];
+                    SOCKETS[uid].push(ws);
                     // Store until server restarts Police data
                     if (STOCK[uid] === undefined) {
                         STOCK[uid] = {
@@ -631,6 +644,62 @@ wss.on('connection', function(ws) {
                 if (VOLS.length == 0) return withResponse(ws, pack.query, 'Нет свободных волонтеров.');
                 response = VOLS[0];
             } break;
+
+            // Chess
+            case 'chess': {
+                let action = pack.action;
+                switch(action) {
+                    case 'newgame': {
+                        let chessid = nanoid();
+                        let ind = (CHESSMATCHES.push(new ChessMatch(chessid)))-1;
+                        CHESSMATCHES[ind].players.push({id: uid, turn: 1});
+                        response = {chessid, board: CHESSMATCHES[ind].board(), turn: 1};
+                    } break;
+                    case 'joingame': {
+                        let chessid = pack.chessid,
+                            ind = CHESSMATCHES.findIndex(e => e.id == chessid);
+                        if (ind != -1) {
+                            let turn = (CHESSMATCHES[ind].players.length+1),
+                                pind = CHESSMATCHES[ind].players.findIndex(e => e.id == uid);
+                            console.log('My id '+uid);
+                            console.log(CHESSMATCHES[ind].players);
+                            if (pind != -1) {
+                                turn = CHESSMATCHES[ind].players[pind].turn;
+                            }
+                            else {
+                                CHESSMATCHES[ind].players.push({id: uid, turn});
+                            }
+                            response = {chessid, board: CHESSMATCHES[ind].board(), turn};
+                        }
+                    } break;
+                    case 'moves': {
+                        let chessid = pack.chessid,
+                            square = pack.from,
+                            ind = CHESSMATCHES.findIndex(e => e.id == chessid);
+                        if (ind != -1) {
+                            let chessmatch = CHESSMATCHES[ind];
+                            response = chessmatch.chess.moves({square, verbose: true});
+                        }
+                    } break;
+                    case 'move': {
+                        let chessid = pack.chessid,
+                            from = pack.from,
+                            to = pack.to,
+                            ind = CHESSMATCHES.findIndex(e => e.id == chessid);
+                        if (ind != -1) {
+                            let chessmatch = CHESSMATCHES[ind],
+                                turn = chessmatch.chess.move({from, to, promotion: 'q'});
+
+                            if (turn != null) response = {board: CHESSMATCHES[ind].board()};
+                            else response = turn;
+
+                            for(let i = 0; i < chessmatch.players.length; i++) {
+                                emit(SOCKETS[chessmatch.players[i].id], 'move', {data: response});
+                            }
+                        }
+                    } break;
+                }
+            } break;
         }
         emit(ws, '&'+pack.query, {response});
         let after = performance.now();
@@ -656,8 +725,15 @@ wss.on('connection', function(ws) {
                 }
             }
         }
-        delete USERS[uid];
-        delete SOCKETS[uid];
+        // If user has more than one tabs, then keep his data
+        if (SOCKETS[uid]?.length > 1) {
+            let ind = SOCKETS[uid].findIndex(e => e == ws);
+            if (ind != -1) SOCKETS[uid].splice(ind, 1);
+        }
+        else {
+            delete USERS[uid];
+            delete SOCKETS[uid];
+        }
 
         // Delete VOLS
         let vols_index = VOLS.findIndex(e => e.id == uid);
@@ -754,7 +830,10 @@ function emit(ws, query, data) {
     for(let i in data) {
         pack[i] = data[i];
     }
-    ws.send(JSON.stringify(pack));
+    if (ws[0] === undefined) ws = [ws];
+    for(let i = 0; i < ws.length; i++) {
+        ws[i].send(JSON.stringify(pack));
+    }
 }
 
 // Ping check
