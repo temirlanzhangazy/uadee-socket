@@ -1,7 +1,7 @@
 const { performance } = require('perf_hooks'),
     express = require('express'),
     app = express(),
-    server = require('http').createServer(app),
+    server = require('https').createServer(app),
     WebSocket = require('ws'),
     { nanoid } = require('nanoid'),
     moment = require('moment'),
