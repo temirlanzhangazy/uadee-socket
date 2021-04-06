@@ -224,13 +224,18 @@ wss.on('connection', function(ws) {
                     password,
                     participants: JSON.stringify(members)
                 });
-                for(i in participants) {
+                let participantsString = '';
+                for(let i = 0; i < participants.length; i++) {
                     let p = await selectUser('id', participants[i]); // p -> participant
                     if (p.conversations == null) p.conversations = [];
 
                     let pc = p.conversations;
                     pc.push({id: newConv.id, password, messagesRead: 0});
                     let pcJson = JSON.stringify(pc);
+
+                    let comma = ', ';
+                    if (i == participants.length-1) comma = '';
+                    participantsString = participantsString+p.login+comma;
 
                     if (USERS[participants[i]] != undefined) { // If this user is actually online, then just update the new value
                         USERS[participants[i]].conversations = pc;
@@ -240,6 +245,7 @@ wss.on('connection', function(ws) {
 
                     const [results, metadata] = await db.sequelize.query(`UPDATE users SET conversations = ? WHERE id = ?`, {replacements: [pcJson, p.id]});
                 }
+                newMessage(newConv.id, -1, `${USERS[uid].login} создал беседу ${newConv.name} с участниками ${participantsString}.`);
                 response = newConv;
             } break;
             case 'editConversation': {
