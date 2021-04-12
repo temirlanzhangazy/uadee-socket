@@ -30,7 +30,8 @@ const minInterval = 800,
 let USERS = {},
     SOCKETS = {},
     STOCK = {},
-    BOARDS = {};
+    BOARDS = {},
+    CALLROOMS = {};
 
 let VOLS = [];
 
@@ -88,6 +89,20 @@ class Police {
             pass = -2;
         }
         return pass;
+    }
+}
+class CallRoom {
+    constructor(id) {
+        this.id = id;
+        this.members = [];
+    }
+    newMember(id, peerid) {
+        if (this.members.findIndex(e => e.id == id) != -1) return;
+        let newMemberData = {id, peerid};
+        this.members.forEach(e => {
+            emit(SOCKETS[e.id], 'videocall_newMember', newMemberData);
+        });
+        this.members.push(newMemberData);
     }
 }
 db.sequelize.sync({alter: true}).then(async (req) => {
@@ -612,6 +627,25 @@ wss.on('connection', function(ws) {
                 if (USERS[uid].status < 1) return withResponse(ws, pack.query, 'У вас нет прав.');
                 for(i in USERS) {
                     emit(SOCKETS[USERS[i].id], 'announce', {type: 'I', admin_id: uid, message: `Администратор ${USERS[uid].login}: ${message}`});
+                }
+            } break;
+            case 'videoCall': {
+                let action = pack.action;
+                switch(action) {
+                    case 'newRoom': {
+                        let roomid = nanoid();
+                        CALLROOMS[roomid] = new CallRoom(roomid);
+                        let room = CALLROOMS[roomid];
+                        room.newMember(USERS[uid].id, USERS[uid].peer);
+                        response = room;
+                    } break;
+                    case 'joinRoom': {
+                        let roomid = pack.roomid,
+                            room = CALLROOMS[roomid];
+                        if (!room) return withResponse(ws, pack.query, 'Комната не существует.');
+                        room.newMember(USERS[uid].id, USERS[uid].peer);
+                        response = room;
+                    } break;
                 }
             } break;
             // Peers
