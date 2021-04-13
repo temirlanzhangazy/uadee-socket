@@ -100,9 +100,23 @@ class CallRoom {
         if (this.members.findIndex(e => e.id == id) != -1) return;
         let newMemberData = {id, peerid};
         this.members.forEach(e => {
+            if (!SOCKETS[e.id]) return;
             emit(SOCKETS[e.id], 'videocall_newMember', newMemberData);
         });
         this.members.push(newMemberData);
+
+        if (USERS[id] != undefined) {
+            SOCKETS[id].callroom = this.id;
+        }
+    }
+    deleteMember(id) {
+        let ind = this.members.findIndex(e => e.id == id);
+        if (ind == -1) return;
+        this.members.splice(ind, 1);
+        this.members.forEach(e => {
+            if (!SOCKETS[e.id]) return;
+            emit(SOCKETS[e.id], 'videocall_leftMember', {id});
+        });
     }
 }
 db.sequelize.sync({alter: true}).then(async (req) => {
@@ -633,10 +647,17 @@ wss.on('connection', function(ws) {
                 let action = pack.action;
                 switch(action) {
                     case 'newRoom': {
-                        let roomid = nanoid();
+                        let roomid = nanoid(),
+                            members = pack.members;
                         CALLROOMS[roomid] = new CallRoom(roomid);
                         let room = CALLROOMS[roomid];
                         room.newMember(USERS[uid].id, USERS[uid].peer);
+                        
+                        members.forEach(e => {
+                            console.log(e);
+                            if (SOCKETS[e] === undefined || e == uid) return;
+                            emit(SOCKETS[e], 'videocall_incoming', {caller: USERS[uid].login, roomid});
+                        });
                         response = room;
                     } break;
                     case 'joinRoom': {
@@ -645,6 +666,13 @@ wss.on('connection', function(ws) {
                         if (!room) return withResponse(ws, pack.query, 'Комната не существует.');
                         room.newMember(USERS[uid].id, USERS[uid].peer);
                         response = room;
+                    } break;
+                    case 'leaveRoom': {
+                        let roomid = SOCKETS[uid].callroom,
+                            room = CALLROOMS[roomid];
+                        if (!room) return withResponse(ws, pack.query, 'Комната не существует.');
+                        room.deleteMember(USERS[uid].id);
+                        response = 'ok';
                     } break;
                 }
             } break;
@@ -765,6 +793,10 @@ wss.on('connection', function(ws) {
                 }
             }
         }
+        if (SOCKETS[uid].callroom) {
+            let callroom = CALLROOMS[SOCKETS[uid].callroom];
+            callroom.deleteMember(uid);
+        }
         // If user has more than one tabs, then keep his data
         if (SOCKETS[uid]?.length > 1) {
             let ind = SOCKETS[uid].findIndex(e => e == ws);
@@ -837,6 +869,10 @@ async function updateMe(user) {
             // If found someone
             if (query.length > 0) {
                 let user_newData = query[0];
+                
+                let us = USERS[user.id];
+                if (us.peer) user_newData.peer = us.peer;
+
                 USERS[user.id] = user_newData;
                 
                 if (typeof USERS[user.id].conversations == 'string') {
