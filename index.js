@@ -10,8 +10,8 @@ const { performance } = require('perf_hooks'),
     port = 4000,
     { Chess } = require('chess.js');
 
-const { resolve } = require('path');
-const randomColor = require('./scripts/randomcolor');
+require('path');
+require('./scripts/randomcolor');
 
 app.get('/', (req, res) => res.send('Nothing to do here.'));
 
@@ -126,10 +126,10 @@ class Pen {
         if (this.members.findIndex(e => e.id == id) != -1) return;
         let newMemberData = {id, login, peerid};
 
-        // this.members.forEach(e => {
-        //     if (!SOCKETS[e.id]) return;
-        //     emit(SOCKETS[e.id], 'videocall_newMember', newMemberData);
-        // });
+        this.members.forEach(e => {
+            if (!SOCKETS[e.id]) return;
+            emit(SOCKETS[e.id], 'pen_newMember', newMemberData);
+        });
         this.members.push(newMemberData);
 
         if (USERS[id] != undefined) {
@@ -137,7 +137,7 @@ class Pen {
         }
     }
 }
-db.sequelize.sync({alter: true}).then(async (req) => {
+db.sequelize.sync({alter: true}).then(async () => {
     console.log('Sequalize started successfully.');
 });
 wss.on('connection', function(ws) {
@@ -150,13 +150,8 @@ wss.on('connection', function(ws) {
             let pass = STOCK[uid]?.police?.inspect();
             switch (pass) {
                 case -1: emit(ws, 'recaptcha'); break;
-                case -2:
-                    emit(ws, 'recaptcha');
-                    return withResponse(ws, pack.query, 'suspicious');
-                break;
-                case undefined:
-                    return withResponse(ws, pack.query, 'No STOCK inspection.');
-                break;
+                case -2: emit(ws, 'recaptcha'); return withResponse(ws, pack.query, 'suspicious');
+                case undefined: return withResponse(ws, pack.query, 'No STOCK inspection.');
             }
         }
         // POLICE CHECK: Okay sir, зря быканул \\
@@ -225,8 +220,8 @@ wss.on('connection', function(ws) {
             case 'getUsers': {
                 let collectedList = [];
                 packLoop:
-                for(i in pack.list) {
-                    for(j in USERS) {
+                for(let i in pack.list) {
+                    for(let j in USERS) {
                         if (pack.list[i] == USERS[j].id) {
                             collectedList.push(pack.list[i]);
                             continue packLoop;
@@ -241,7 +236,7 @@ wss.on('connection', function(ws) {
                     owner_id = user.id,
                     name = pack.name,
                     participants = pack.participants,
-                    private = pack.private,
+                    isPrivate = pack.private,
                     password = nanoid();
 
                 if (name.length < 1 || name.length > 144) return withResponse(ws, pack.query, 'Too long name.');
@@ -249,11 +244,11 @@ wss.on('connection', function(ws) {
 
                 participants.push(owner_id);
                 let members = [];
-                for(i in participants) {
+                for(let i in participants) {
                     let rights = participants[i] == owner_id ? 1 : 0; // If it's owner then rights = 1
                     members.push({id: participants[i], rights});
                 }
-                if (private) {
+                if (isPrivate) {
                     let conv = await conversation.count({
                         where: {
                             participants: JSON.stringify(members)
@@ -289,7 +284,7 @@ wss.on('connection', function(ws) {
                         emit(SOCKETS[participants[i]], 'newConversation', {name});
                     }
 
-                    const [results, metadata] = await db.sequelize.query(`UPDATE users SET conversations = ? WHERE id = ?`, {replacements: [pcJson, p.id]});
+                    await db.sequelize.query(`UPDATE users SET conversations = ? WHERE id = ?`, {replacements: [pcJson, p.id]});
                 }
                 newMessage(newConv.id, -1, `${USERS[uid].login} создал беседу ${newConv.name} с участниками ${participantsString}.`);
                 response = newConv;
@@ -307,10 +302,9 @@ wss.on('connection', function(ws) {
                     case 'add': {
                         let addIds = data.addIds,
                             participants = JSON.parse(conv.participants),
-                            haveRights = false,
-                            exists = false;
+                            haveRights = false;
                         checkIfHasRights:
-                        for(i in participants) {
+                        for(let i in participants) {
                             if (participants[i].id == uid && participants[i].rights == 1) {
                                 haveRights = true;
                                 break checkIfHasRights;
@@ -320,7 +314,7 @@ wss.on('connection', function(ws) {
                         if (!haveRights) return withResponse(ws, pack.query, 'У вас нет прав.');
 
                         let addMembers = [];
-                        for(i in addIds) {
+                        for(let i in addIds) {
                             if (addIds[i] == uid) continue;
                             participants.push({id: addIds[i], rights: 0, enteredDate: moment()});
 
@@ -330,17 +324,17 @@ wss.on('connection', function(ws) {
                             let pc = p.conversations;
                             pc.push({id: conv.id, password: conv.password, messagesRead: 0});
                             let pcJson = JSON.stringify(pc);
-                            const [results, metadata] = await db.sequelize.query(`UPDATE users SET conversations = ? WHERE id = ?`, {replacements: [pcJson, p.id]});
+                            await db.sequelize.query(`UPDATE users SET conversations = ? WHERE id = ?`, {replacements: [pcJson, p.id]});
                             newMessage(conv_id, -1, `${USERS[uid].login} добавил ${p.login} в беседу.`);
                         }
                         conv.participants = JSON.stringify(participants);
                         await conv.save();
                         
-                        for(i in participants) {
+                        for(let i in participants) {
                             let op = participants[i];
                             if (USERS[op.id] != undefined) { // If this user is actually online, then just update the new value
                                 // Sync online user with new conversation
-                                for(j in addMembers) {
+                                for(let j in addMembers) {
                                     emit(SOCKETS[op.id], 'addedConversation', {addId: addMembers[j].id, conv_id: conv.id, name: conv.name, addLogin: addMembers[j].login, addFullname: addMembers[j].fullname});
                                 }
                             }
@@ -350,10 +344,9 @@ wss.on('connection', function(ws) {
                     case 'kick': {
                         let kickId = data.kickId,
                             participants = JSON.parse(conv.participants),
-                            haveRights = false,
-                            exists = false;
+                            haveRights = false;
                         checkIfHasRights:
-                        for(i in participants) {
+                        for(let i in participants) {
                             if (participants[i].id == uid && participants[i].rights == 1) {
                                 haveRights = true;
                                 break checkIfHasRights;
@@ -362,7 +355,7 @@ wss.on('connection', function(ws) {
                         if (kickId == uid) haveRights = true; // Kick myself = leave
                         if (!haveRights) return withResponse(ws, pack.query, 'У вас нет прав.');
                         removeProcess:
-                        for(i in participants) {
+                        for(let i in participants) {
                             if (participants[i].id == kickId) {
                                 participants.splice(i, 1);
                                 break removeProcess;
@@ -379,7 +372,7 @@ wss.on('connection', function(ws) {
                         let pc = p.conversations;
 
                         removeFromUsersTable:
-                        for(i in pc) {
+                        for(let i in pc) {
                             if (pc[i].id == conv_id) {
                                 pc.splice(i, 1);
                                 break removeFromUsersTable;
@@ -387,10 +380,10 @@ wss.on('connection', function(ws) {
                         }
                         let pcJson = JSON.stringify(pc);
                         
-                        const [results, metadata] = await db.sequelize.query(`UPDATE users SET conversations = ? WHERE id = ?`, {replacements: [pcJson, p.id]});
+                        await db.sequelize.query(`UPDATE users SET conversations = ? WHERE id = ?`, {replacements: [pcJson, p.id]});
                         
                         participants.unshift({id: kickId});
-                        for(i in participants) {
+                        for(let i in participants) {
                             let op = participants[i];
                             if (USERS[op.id] != undefined) { // If this user is actually online, then just update the new value
                                 // Sync online user with deleted conversation
@@ -412,7 +405,7 @@ wss.on('connection', function(ws) {
                 let user = USERS[uid],
                     conds = [],
                     pc = user.conversations;
-                for(i in pc) {
+                for(let i in pc) {
                     conds.push({id: pc[i].id, password: pc[i].password});
                 }
                 response = {};
@@ -446,11 +439,11 @@ wss.on('connection', function(ws) {
                 await updateMe(USERS[uid]); // Sync user data with real data
                 let user = USERS[uid],
                     pc = user.conversations;
-                for(i in pc) {
+                for(let i in pc) {
                     if (pc[i].id == conv_id) {
                         pc[i].messagesRead = messagesRead;
                         let pcJson = JSON.stringify(pc);
-                        const [results, metadata] = await db.sequelize.query(`UPDATE users SET conversations = ? WHERE id = ?`, {replacements: [pcJson, user.id]});
+                        await db.sequelize.query(`UPDATE users SET conversations = ? WHERE id = ?`, {replacements: [pcJson, user.id]});
                         break;
                     }
                 }
@@ -472,7 +465,7 @@ wss.on('connection', function(ws) {
                 let message = pack.message;
                 await updateMe(USERS[uid]);
                 if (USERS[uid].status < 1) return withResponse(ws, pack.query, 'У вас нет прав.');
-                for(i in USERS) {
+                for(let i in USERS) {
                     emit(SOCKETS[USERS[i].id], 'announce', {type: 'I', admin_id: uid, message: `Администратор ${USERS[uid].login}: ${message}`});
                 }
             } break;
@@ -534,7 +527,7 @@ wss.on('connection', function(ws) {
             case 'peersGet': {
                 let users_list = pack.users,
                     peers = [];
-                for(i in users_list) {
+                for(let i in users_list) {
                     if (USERS[users_list[i]] != undefined) {
                         peers.push({peer: USERS[users_list[i]].peer, user_id: users_list[i]});
                     }
@@ -564,6 +557,7 @@ wss.on('connection', function(ws) {
             } break;
             case 'spacepen': {
                 let action = pack.action;
+                console.log(action);
                 switch(action) {
                     case 'newpen': {
                         let penid = nanoid();
@@ -571,6 +565,14 @@ wss.on('connection', function(ws) {
                             pen = PENS[ind-1];
                         pen.newMember(uid, USERS[uid].login, USERS[uid].peer);
                         response = {penid};
+                    } break;
+                    case 'joinpen': {
+                        let penid = pack.penid;
+                        let ind = PENS.findIndex(e => e.id == penid);
+                        if (ind == -1) return withResponse(ws, pack.query, 'Pen не существует.');
+                        let pen = PENS[ind];
+                        pen.newMember(uid, USERS[uid].login, USERS[uid].peer);
+                        response = {penid, members: pen.members};
                     } break;
                 }
             } break;
@@ -634,7 +636,7 @@ wss.on('connection', function(ws) {
         let after = performance.now();
         console.log(USERS[uid]?.login+' made a query. Served in '+(after-before).toFixed(2)+' ms.')
     });
-    ws.on('close', function(close) {
+    ws.on('close', function() {
         if (!SOCKETS[uid]) return;
 
         if (SOCKETS[uid].callroom) {
@@ -675,7 +677,7 @@ async function newMessage(conv_id, owner_id, text, hash, ws, otherData) {
     participants = JSON.parse(conv.participants);
 
     checkIfHaveRights:
-    for (i in participants) {
+    for(let i in participants) {
         if (participants[i].id == owner_id) {
             haveRights = true;
             break checkIfHaveRights;
@@ -685,13 +687,13 @@ async function newMessage(conv_id, owner_id, text, hash, ws, otherData) {
 
     conv.totalMessages = conv.totalMessages+1;
 
-    response = await message.create({
+    let response = await message.create({
         conv_id,
         owner_id,
         text,
         otherData: JSON.stringify(otherData)
     });
-    for(i in USERS) {
+    for(let i in USERS) {
         let iu = USERS[i],
             convs = iu.conversations;
 
@@ -756,7 +758,7 @@ function emit(ws, query, data) {
 }
 
 // Ping check
-const globalEachSecond = setInterval(() => {
+setInterval(() => {
     wss.clients.forEach((ws) => {
         if (ws.uid === undefined) return;
         ws.ping();
