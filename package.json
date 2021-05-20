@@ -17,6 +17,7 @@
     "chess.js": "^0.11.0",
     "express": "^4.17.1",
     "fs": "0.0.1-security",
+    "json-compress": "git+https://github.com/Alamantus/JSON-Compress.git",
     "moment": "^2.29.1",
     "mysql2": "^2.2.5",
     "nanoid": "^3.1.20",

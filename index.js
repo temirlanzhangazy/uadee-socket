@@ -10,6 +10,9 @@ const { performance } = require('perf_hooks'),
     port = 4000,
     { Chess } = require('chess.js');
 
+const ACTIVITY_SPACEPEN = 1;
+const STATES_PENDING = 0,
+    STATES_MEMBER = 1;
 require('path');
 require('./scripts/randomcolor');
 
@@ -19,7 +22,7 @@ server.listen(port, () => console.log(`Listening on the port ${port}`));
 
 const db = require('./models'),
     { Op, QueryTypes } = db.Sequelize,
-    { conversation, message } = require('./models');
+    { conversation, message, pen } = require('./models');
 
 const wss = new WebSocket.Server({server: server});
 
@@ -30,10 +33,10 @@ const minInterval = 800,
 const USERS = {},
     SOCKETS = {},
     STOCK = {},
-    CALLROOMS = {};
+    CALLROOMS = {},
+    PENS = {};
 
-let VOLS = [],
-    PENS = [];
+let VOLS = [];
 
 let CHESSMATCHES = [];
 class ChessMatch {
@@ -117,24 +120,170 @@ class CallRoom {
         }
     }
 }
+const colors = [0xb62b6e, 0x9628c6, 0x4374b7, 0xabb8af, 0x98c807, 0xb1a24a, 0xedd812, 0xef9421, 0xd13814];
 class Pen {
     constructor(id) {
+        if (!id) id = -1;
         this.id = id;
+        this.name = '';
         this.members = [];
+        this.onlineMembers = [];
+        this.data = [];
     }
-    newMember(id, login, peerid) {
-        if (this.members.findIndex(e => e.id == id) != -1) return;
-        let newMemberData = {id, login, peerid};
-
-        this.members.forEach(e => {
-            if (!SOCKETS[e.id]) return;
-            emit(SOCKETS[e.id], 'pen_newMember', newMemberData);
+    async sync(data) {
+        return new Promise((resolve) => {
+            (async () => {
+                let row = await pen.findOne({
+                        where: {id: this.id}
+                    }),
+                    syncData = {
+                        members: JSON.stringify(this.members),
+                        data: JSON.stringify(this.data)
+                    };
+                if (row === null) {
+                    if (!data.owner_id) return;
+                    row = await pen.create({
+                        owner_id: data.owner_id,
+                        name: data.name,
+                        password: data.password,
+                        ...syncData
+                    });
+                }
+                else {
+                    if (data) { // Was .sync called for initialization
+                        this.members = JSON.parse(row.members);
+                        this.data = JSON.parse(row.data);
+                    }
+                    else {
+                        await row.update(syncData);
+                    }
+                }
+                this.id = row.id;
+                this.password = row.password;
+                this.name = row.name;
+                resolve(this);
+            })();
         });
-        this.members.push(newMemberData);
-
+    }
+    async newMember(id, login, peerid, permission) {
+        let permissions = {
+            moderate: false,
+            edit: true,
+            invite: true,
+            uninvite: false,
+            delete: false,
+            ...permission
+        };
+        let newMemberData = {id, login, permissions},
+            tempData = {
+                peerid,
+                color: colors[Math.floor(Math.random() * colors.length)]
+            };
+        this.onlineMembers.forEach(e => {
+            if (!SOCKETS[e.id]) return;
+            emit(SOCKETS[e.id], 'pen_newMember', {...newMemberData, ...tempData});
+        });
+        if (this.onlineMembers.findIndex(e => e.id == id) == -1){
+            this.onlineMembers.push({...newMemberData, ...tempData});
+        }
+        // If invited user is not a member
+        if (this.members.findIndex(e => e.id == id) === -1) {
+            this.members.push(newMemberData);
+        }
         if (USERS[id] != undefined) {
             SOCKETS[id].spacepen = this.id;
         }
+        let mem = await selectUser('id', id);
+        if (!mem) return;
+        let activities = mem.activities,
+            ind = activities.findIndex(e => e.activity == ACTIVITY_SPACEPEN && e.id == this.id);
+        if (ind != -1) activities.splice(ind, 1);
+        activities.push({activity: ACTIVITY_SPACEPEN, state: STATES_MEMBER, id: this.id, password: this.password});
+        await db.sequelize.query(`UPDATE users SET activities = ? WHERE id = ?`, {replacements: [JSON.stringify(activities), mem.id]});
+
+        this.sync();
+    }
+    deleteMember(id, remove) {
+        if (remove) {
+            let mind = this.members.findIndex(e => e.id == id);
+            if (mind != -1) {
+                this.members.splice(mind, 1);
+            }
+        }
+        let ind = this.onlineMembers.findIndex(e => e.id == id);
+        if (ind == -1) return;
+        this.onlineMembers.forEach(e => {
+            if (!SOCKETS[e.id]) return;
+            emit(SOCKETS[e.id], 'pen_leftMember', {id, remove});
+        });
+        this.onlineMembers.splice(ind, 1);
+        // If room is empty now
+        if (this.onlineMembers.length == 0) {
+            delete PENS[this.id];
+        }
+    }
+    async updateMember(uid, memberid, options) {
+        let myind = this.members.findIndex(e => e.id == uid);
+        if (myind == -1) return;
+        let updater = this.members[myind];
+
+        let ind = this.members.findIndex(e => e.id == memberid);
+        if (ind == -1) return;
+        let member = this.members[ind];
+        switch (options.action) {
+            case 'remove': {
+                if (!updater.permissions.uninvite) return;
+                let mem = await selectUser('id', member.id);
+                if (!mem) return;
+                let activities = mem.activities,
+                    ind = activities.findIndex(e => e.activity == ACTIVITY_SPACEPEN && e.id == this.id);
+                if (ind != -1) activities.splice(ind, 1);
+                await db.sequelize.query(`UPDATE users SET activities = ? WHERE id = ?`, {replacements: [JSON.stringify(activities), mem.id]});
+
+                this.deleteMember(mem.id, true);
+            } break;
+            default: {
+                if (!updater.permissions.moderate) return;
+                member.permissions = {
+                    ...member.permissions,
+                    ...options
+                }
+                
+                this.onlineMembers.forEach(e => {
+                    if (!SOCKETS[e.id]) return;
+                    emit(SOCKETS[e.id], 'pen_updatePermissions', {id: memberid, options});
+                });
+                this.sync();
+            } break;
+        }
+        this.sync();
+    }
+    async update(action, data) {
+        switch(action) {
+            case 'deleteobjects':
+                data.forEach(e => {
+                    let ind = this.data.findIndex(i => i.objectid == e);
+                    if (ind != -1) {
+                        this.data.splice(ind, 1);
+                    }
+                });
+            break;
+            default:
+                data.forEach(e => {
+                    let ind = this.data.findIndex(i => i.objectid == e.objectid);
+                    if (ind != -1) {
+                        let obj = this.data[ind];
+                        if (e.pos) obj.pos = e.pos;
+                        if (e.text) obj.text = e.text;
+                        if (e.textStyles) obj.textStyles = e.textStyles;
+                    }
+                    else {
+                        this.data.push(e);
+                    }
+                });
+            break;
+        }
+        pen.update({data: JSON.stringify(this.data)}, {where: {id: this.id, password: this.password}});
     }
 }
 db.sequelize.sync({alter: true}).then(async () => {
@@ -178,6 +327,7 @@ wss.on('connection', function(ws) {
                 try {
                     //if (USERS[pack.id] != undefined) return withResponse(ws, pack.query, 'alreadysignedin');
                     let newUser = await selectUser('login', pack.login);
+                    if (!newUser) return;
                     if (newUser.password != pack.password) return withResponse(ws, pack.query, 'Wrong user login or password.');
                     // uid is global val for 'connection'
                     uid = newUser.id;
@@ -268,6 +418,7 @@ wss.on('connection', function(ws) {
                 let participantsString = '';
                 for(let i = 0; i < participants.length; i++) {
                     let p = await selectUser('id', participants[i]); // p -> participant
+                    if (!p) return;
                     if (p.conversations == null) p.conversations = [];
 
                     let pc = p.conversations;
@@ -319,6 +470,7 @@ wss.on('connection', function(ws) {
                             participants.push({id: addIds[i], rights: 0, enteredDate: moment()});
 
                             let p = await selectUser('id', addIds[i]); // p -> participant
+                            if (!p) return;
                             addMembers.push({id: p.id, login: p.login, fullname: p.fullname});
                             if (p.conversations == null) p.conversations = [];
                             let pc = p.conversations;
@@ -368,6 +520,7 @@ wss.on('connection', function(ws) {
                         await conv.save();
 
                         let p = await selectUser('id', kickId); // p -> participant
+                        if (!p) return;
                         if (p.conversations == null) p.conversations = [];
                         let pc = p.conversations;
 
@@ -476,7 +629,7 @@ wss.on('connection', function(ws) {
                         let roomid = nanoid();
                         CALLROOMS[roomid] = new CallRoom(roomid);
                         let room = CALLROOMS[roomid];
-                        room.newMember(USERS[uid].id, USERS[uid].login, USERS[uid].peer);
+                        room.newMember(USERS[uid].id, USERS[uid].login, USERS[uid].peer, {});
                         
                         response = roomid;
                     } break;
@@ -557,22 +710,129 @@ wss.on('connection', function(ws) {
             } break;
             case 'spacepen': {
                 let action = pack.action;
-                console.log(action);
                 switch(action) {
                     case 'newpen': {
-                        let penid = nanoid();
-                        let ind = PENS.push(new Pen(penid)),
-                            pen = PENS[ind-1];
-                        pen.newMember(uid, USERS[uid].login, USERS[uid].peer);
-                        response = {penid};
+                        let pens = new Pen(),
+                            name = pack.name,
+                            password = nanoid();
+                        await pens.sync({
+                            owner_id: uid,
+                            password,
+                            name
+                        });
+                        PENS[pens.id] = pens;
+                        pens.newMember(uid, USERS[uid].login, USERS[uid].peer, {
+                            moderate: true,
+                            edit: true,
+                            invite: true,
+                            uninvite: true,
+                            delete: true
+                        });
+                        await pens.sync();
+                        response = pens;
+                    } break;
+                    case 'invitepen': {
+                        let penid = pack.penid,
+                            members = pack.members,
+                            pens = PENS[penid];
+                        if (!pens) return withResponse(ws, pack.query, 'Pen не существует.');
+
+                        let ind = pens.members.findIndex(e => e.id == uid);
+                        if (ind == -1) return;
+                        let member = pens.members[ind];
+                        if (!member.permissions.invite) return withResponse(ws, pack.query, 'У вас нет прав на приглашение в этот Pen.');
+
+                        members.forEach(async (e) => {
+                            let mem = await selectUser('id', e);
+                            if (!mem) return;
+                            let activities = mem.activities,
+                                ind = activities.findIndex(e => e.activity == ACTIVITY_SPACEPEN && e.id == pens.id);
+                            if (ind == -1) {
+                                activities.push({activity: ACTIVITY_SPACEPEN, state: STATES_PENDING, id: pens.id, password: pens.password});
+                                await db.sequelize.query(`UPDATE users SET activities = ? WHERE id = ?`, {replacements: [JSON.stringify(activities), e]});
+                                if (SOCKETS[e]) {
+                                    emit(SOCKETS[e], 'pen_invite', {id: pens.id, password: pens.password, name: pens.name, updatedAt: moment()});
+                                }
+                            }
+                        });
+                        response = 'OK';
+                    } break;
+                    case 'updatemember': {
+                        let penid = pack.penid,
+                            member = pack.memberid,
+                            options = pack.options,
+                            pens = PENS[penid];
+                        if (!pens) return withResponse(ws, pack.query, 'Pen не существует.');
+                        pens.updateMember(uid, member, options);
+                    } break;
+                    case 'disconnect': {
+                        let spacepen = PENS[SOCKETS[uid].spacepen];
+                        if (spacepen) {
+                            spacepen.deleteMember(uid);
+                        }
+                    } break;
+                    case 'getMyPens': {
+                        await updateMe(USERS[uid]); // Sync user data with real data
+                        let user = USERS[uid],
+                            conds = [],
+                            acts = user.activities,
+                            userActs = {};
+                        for(let i in acts) {
+                            if (acts[i].activity != ACTIVITY_SPACEPEN) continue;
+                            if (!acts[i].id) continue;
+                            conds.push({id: acts[i].id, password: acts[i].password});
+                            userActs[acts[i].id] = acts[i];
+                        }
+                        let list = await pen.findAll({
+                            where: {
+                                [Op.or]: conds
+                            },
+                            order: [
+                                ['updatedAt', 'DESC']
+                            ]
+                        });
+                        response = [];
+                        for(let i = 0; i < list.length; i++) {
+                            let l = list[i];
+                            if (!userActs[l.id]) continue;
+                            
+                            let memberData = JSON.parse(l.members),
+                                ind = memberData.findIndex(e => e.id == uid);
+                            response.push({id: l.id, name: l.name, password: l.password, data: userActs[l.id], memberData: ind == -1 ? null : memberData[ind], updatedAt: l.updatedAt});
+                        }
                     } break;
                     case 'joinpen': {
-                        let penid = pack.penid;
-                        let ind = PENS.findIndex(e => e.id == penid);
-                        if (ind == -1) return withResponse(ws, pack.query, 'Pen не существует.');
-                        let pen = PENS[ind];
-                        pen.newMember(uid, USERS[uid].login, USERS[uid].peer);
-                        response = {penid, members: pen.members};
+                        let penid = pack.penid,
+                            password = pack.password,
+                            pens = PENS[penid];
+                        
+                        await updateMe(USERS[uid]); // Sync user data with real data
+                        let user = USERS[uid],
+                            ind = user.activities.findIndex(i => (i.activity == ACTIVITY_SPACEPEN && i.id == penid && i.password == password));
+                        if (ind == -1) return withResponse(ws, pack.query, 'У Вас нет прав вступать в этот Pen.');
+                        let row = await pen.findOne({
+                            where: {id: penid, password}
+                        });
+                        if (row === null) return withResponse(ws, pack.query, 'Pen не существует.');
+                        if (!pens) {
+                            pens = new Pen(penid);
+                            await pens.sync(true); // Create a new Pen from database
+                        }
+                        PENS[pens.id] = pens;
+                        pens.newMember(uid, USERS[uid].login, USERS[uid].peer);
+                        response = pens;
+                    } break;
+                    default: {
+                        let penid = SOCKETS[uid].spacepen,
+                            data = pack.data,
+                            memberid = uid,
+                            pens = PENS[penid];
+                        let ind = pens.members.findIndex(e => e.id == memberid);
+                        if (ind == -1) return;
+                        let member = pens.members[ind];
+
+                        if (!member.permissions.edit) return withResponse(ws, pack.query, 'У вас нет прав на редактирование этого Pen.');
+                        pens.update(action, data);
                     } break;
                 }
             } break;
@@ -632,7 +892,7 @@ wss.on('connection', function(ws) {
                 }
             } break;
         }
-        emit(ws, '&'+pack.query, {response});
+        emit(ws, '&'+pack.hash, {response});
         let after = performance.now();
         console.log(USERS[uid]?.login+' made a query. Served in '+(after-before).toFixed(2)+' ms.')
     });
@@ -643,6 +903,12 @@ wss.on('connection', function(ws) {
             let callroom = CALLROOMS[SOCKETS[uid].callroom];
             if (callroom) {
                 callroom.deleteMember(uid);
+            }
+        }
+        if (SOCKETS[uid].spacepen) {
+            let spacepen = PENS[SOCKETS[uid].spacepen];
+            if (spacepen) {
+                spacepen.deleteMember(uid);
             }
         }
         // If user has more than one tabs, then keep his data
@@ -722,6 +988,9 @@ async function updateMe(user) {
                 if (typeof USERS[user.id].conversations == 'string') {
                     USERS[user.id].conversations = JSON.parse(USERS[user.id].conversations);
                 }
+                if (typeof USERS[user.id].activities == 'string') {
+                    USERS[user.id].activities = JSON.parse(USERS[user.id].activities);
+                }
                 resolve();
             }
             else {
@@ -731,16 +1000,17 @@ async function updateMe(user) {
     });
 }
 async function selectUser(type, login) {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
         db.sequelize.query(`SELECT * FROM users WHERE ${type} = ? LIMIT 1`, { type: QueryTypes.SELECT, replacements: [login] }).then((query) => {
             // If found someone
             if (query.length > 0) {
                 let user = query[0];
                 user.conversations = JSON.parse(user.conversations);
+                user.activities = JSON.parse(user.activities);
                 resolve(user);
             }
             else {
-                reject();
+                resolve(undefined);
             }
         });
     });
