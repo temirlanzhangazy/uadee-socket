@@ -6,7 +6,7 @@ const Sequelize = require('sequelize');
 const basename = path.basename(__filename);
 const db = {};
 
-let local = false,
+let local = true,
     sequelize;
 if (local) {
     sequelize = new Sequelize('uadee_db', 'root', 'root', {

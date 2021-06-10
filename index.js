@@ -299,14 +299,14 @@ wss.on('connection', function(ws) {
             let pass = STOCK[uid]?.police?.inspect();
             switch (pass) {
                 case -1: emit(ws, 'recaptcha'); break;
-                case -2: emit(ws, 'recaptcha'); return withResponse(ws, pack.query, 'suspicious');
-                case undefined: return withResponse(ws, pack.query, 'No STOCK inspection.');
+                case -2: emit(ws, 'recaptcha'); return withResponse(ws, pack.hash, 'suspicious');
+                case undefined: return withResponse(ws, pack.hash, 'No STOCK inspection.');
             }
         }
         // POLICE CHECK: Okay sir, зря быканул \\
 
         let before = performance.now();
-        if (pack.query != 'auth' && uid == -1) return withResponse(ws, pack.query, pack.query+'is declined. No authorization.');
+        if (pack.query != 'auth' && uid == -1) return withResponse(ws, pack.hash, pack.query+'is declined. No authorization.');
         switch(pack.query) {
             case 'recaptcha_chill': {
                 let secret_key = '6LdIXGsaAAAAAIv8viof2Ja0SEKMXxBqbh62itoH',
@@ -325,10 +325,10 @@ wss.on('connection', function(ws) {
             case 'auth': {
                 // pack.login, pack.password
                 try {
-                    //if (USERS[pack.id] != undefined) return withResponse(ws, pack.query, 'alreadysignedin');
+                    //if (USERS[pack.id] != undefined) return withResponse(ws, pack.hash, 'alreadysignedin');
                     let newUser = await selectUser('login', pack.login);
                     if (!newUser) return;
-                    if (newUser.password != pack.password) return withResponse(ws, pack.query, 'Wrong user login or password.');
+                    if (newUser.password != pack.password) return withResponse(ws, pack.hash, 'Wrong user login or password.');
                     // uid is global val for 'connection'
                     uid = newUser.id;
                     ws.uid = uid;
@@ -347,14 +347,14 @@ wss.on('connection', function(ws) {
                     emit(ws, 'online');
                 } catch (e) {
                     // Login is wrong (normally its impossible, because client sends after auth)
-                    return withResponse(ws, pack.query, 'wronglogin');
+                    return withResponse(ws, pack.hash, 'wronglogin');
                     //ws.terminate();
                 }
             } break;
             case 'relation': {
                 let user = USERS[uid],
                     user_b = USERS[pack.user_b];
-                if (user_b === undefined) return withResponse(ws, pack.query, ''); // If he is offline
+                if (user_b === undefined) return withResponse(ws, pack.hash, ''); // If he is offline
 
                 let relationStatus = pack.relationStatus,
                     message;
@@ -388,9 +388,9 @@ wss.on('connection', function(ws) {
                     participants = pack.participants,
                     isPrivate = pack.private,
                     password = nanoid();
-
-                if (name.length < 1 || name.length > 144) return withResponse(ws, pack.query, 'Too long name.');
-                if (participants.length == 0) return withResponse(ws, pack.query, 'No participants.');
+                let alreadyExists = false;
+                if (name.length < 1 || name.length > 144) return withResponse(ws, pack.hash, 'Too long name.');
+                if (participants.length == 0) return withResponse(ws, pack.hash, 'No participants.');
 
                 participants.push(owner_id);
                 let members = [];
@@ -399,46 +399,49 @@ wss.on('connection', function(ws) {
                     members.push({id: participants[i], rights});
                 }
                 if (isPrivate) {
-                    let conv = await conversation.count({
+                    let conv = await conversation.findOne({
                         where: {
                             participants: JSON.stringify(members)
                         }
                     });
                     console.log(conv);
-                    if (conv > 0) {
-                        return withResponse(ws, pack.query, 'Already opened.');
+                    if (conv !== null) {
+                        response = conv;
+                        alreadyExists = true;
                     }
                 }
-                let newConv = await conversation.create({
-                    owner_id,
-                    name,
-                    password,
-                    participants: JSON.stringify(members)
-                });
-                let participantsString = '';
-                for(let i = 0; i < participants.length; i++) {
-                    let p = await selectUser('id', participants[i]); // p -> participant
-                    if (!p) return;
-                    if (p.conversations == null) p.conversations = [];
+                if (!alreadyExists) {
+                    let newConv = await conversation.create({
+                        owner_id,
+                        name,
+                        password,
+                        participants: JSON.stringify(members)
+                    });
+                    let participantsString = '';
+                    for(let i = 0; i < participants.length; i++) {
+                        let p = await selectUser('id', participants[i]); // p -> participant
+                        if (!p) return;
+                        if (p.conversations == null) p.conversations = [];
 
-                    let pc = p.conversations;
-                    pc.push({id: newConv.id, password, messagesRead: 0});
-                    let pcJson = JSON.stringify(pc);
+                        let pc = p.conversations;
+                        pc.push({id: newConv.id, password, messagesRead: 0});
+                        let pcJson = JSON.stringify(pc);
 
-                    let comma = ', ';
-                    if (i == participants.length-1) comma = '';
-                    participantsString = participantsString+p.login+comma;
+                        let comma = ', ';
+                        if (i == participants.length-1) comma = '';
+                        participantsString = participantsString+p.login+comma;
 
-                    if (USERS[participants[i]] != undefined) { // If this user is actually online, then just update the new value
-                        USERS[participants[i]].conversations = pc;
-                        // Sync online user with new conversation
-                        emit(SOCKETS[participants[i]], 'newConversation', {name});
+                        if (USERS[participants[i]] != undefined) { // If this user is actually online, then just update the new value
+                            USERS[participants[i]].conversations = pc;
+                            // Sync online user with new conversation
+                            emit(SOCKETS[participants[i]], 'newConversation', {name});
+                        }
+
+                        await db.sequelize.query(`UPDATE users SET conversations = ? WHERE id = ?`, {replacements: [pcJson, p.id]});
                     }
-
-                    await db.sequelize.query(`UPDATE users SET conversations = ? WHERE id = ?`, {replacements: [pcJson, p.id]});
+                    newMessage(newConv.id, -1, `${USERS[uid].login} создал беседу ${newConv.name} с участниками ${participantsString}.`);
+                    response = newConv;
                 }
-                newMessage(newConv.id, -1, `${USERS[uid].login} создал беседу ${newConv.name} с участниками ${participantsString}.`);
-                response = newConv;
             } break;
             case 'editConversation': {
                 let action = pack.action,
@@ -462,7 +465,7 @@ wss.on('connection', function(ws) {
                             }
                         }
 
-                        if (!haveRights) return withResponse(ws, pack.query, 'У вас нет прав.');
+                        if (!haveRights) return withResponse(ws, pack.hash, 'У вас нет прав.');
 
                         let addMembers = [];
                         for(let i in addIds) {
@@ -505,7 +508,7 @@ wss.on('connection', function(ws) {
                             }
                         }
                         if (kickId == uid) haveRights = true; // Kick myself = leave
-                        if (!haveRights) return withResponse(ws, pack.query, 'У вас нет прав.');
+                        if (!haveRights) return withResponse(ws, pack.hash, 'У вас нет прав.');
                         removeProcess:
                         for(let i in participants) {
                             if (participants[i].id == kickId) {
@@ -617,7 +620,7 @@ wss.on('connection', function(ws) {
             case 'adminBroadcast': {
                 let message = pack.message;
                 await updateMe(USERS[uid]);
-                if (USERS[uid].status < 1) return withResponse(ws, pack.query, 'У вас нет прав.');
+                if (USERS[uid].status < 1) return withResponse(ws, pack.hash, 'У вас нет прав.');
                 for(let i in USERS) {
                     emit(SOCKETS[USERS[i].id], 'announce', {type: 'I', admin_id: uid, message: `Администратор ${USERS[uid].login}: ${message}`});
                 }
@@ -626,18 +629,34 @@ wss.on('connection', function(ws) {
                 let action = pack.action;
                 switch(action) {
                     case 'newRoom': {
-                        let roomid = nanoid();
-                        CALLROOMS[roomid] = new CallRoom(roomid);
+                        let roomid = pack.conv_id,
+                            roomData = {roomid, isNew: true};
+                        if (CALLROOMS[roomid]) { // If room already exists
+                            roomData.isNew = false;
+                        }
+                        else {
+                            CALLROOMS[roomid] = new CallRoom(roomid);
+                        }
                         let room = CALLROOMS[roomid];
                         room.newMember(USERS[uid].id, USERS[uid].login, USERS[uid].peer, {});
                         
-                        response = roomid;
+                        response = roomData;
+                    } break;
+                    case 'roomExists': {
+                        let roomid = pack.conv_id,
+                            roomData = {exists: false};
+                        if (CALLROOMS[roomid]) {
+                            roomData.exists = true;
+                            roomData.members = CALLROOMS[roomid].members;
+                        }
+                        console.log(roomData);
+                        response = roomData;
                     } break;
                     case 'inviteRoom': {
                         let roomid = pack.roomid,
                             members = pack.members,
                             room = CALLROOMS[roomid];
-                        if (!room) return withResponse(ws, pack.query, 'Комната не существует.');
+                        if (!room) return withResponse(ws, pack.hash, 'Комната не существует.');
                         members.forEach(e => {
                             if (room.members.findIndex(i => i.id == e) != -1) return;
                             if (SOCKETS[e] === undefined || e == uid) return;
@@ -649,14 +668,14 @@ wss.on('connection', function(ws) {
                     case 'joinRoom': {
                         let roomid = pack.roomid,
                             room = CALLROOMS[roomid];
-                        if (!room) return withResponse(ws, pack.query, 'Комната не существует.');
+                        if (!room) return withResponse(ws, pack.hash, 'Комната не существует.');
                         room.newMember(USERS[uid].id, USERS[uid].login, USERS[uid].peer);
                         response = room;
                     } break;
                     case 'declineRoom': {
                         let roomid = pack.roomid,
                             room = CALLROOMS[roomid];
-                        if (!room) return withResponse(ws, pack.query, 'Комната не существует.');
+                        if (!room) return withResponse(ws, pack.hash, 'Комната не существует.');
                         room.deleteRinglist(uid);
                         room.members.forEach(e => {
                             if (!SOCKETS[e.id]) return;
@@ -666,7 +685,7 @@ wss.on('connection', function(ws) {
                     case 'leaveRoom': {
                         let roomid = SOCKETS[uid].callroom,
                             room = CALLROOMS[roomid];
-                        if (!room) return withResponse(ws, pack.query, 'Комната не существует.');
+                        if (!room) return withResponse(ws, pack.hash, 'Комната не существует.');
                         room.deleteMember(USERS[uid].id);
                         response = '';
                     } break;
@@ -698,14 +717,14 @@ wss.on('connection', function(ws) {
             // Volunteers
             case 'volAuth': {
                 let index = VOLS.findIndex(e => e.id == uid);
-                if (index != -1) return withResponse(ws, pack.query, 'already');
+                if (index != -1) return withResponse(ws, pack.hash, 'already');
                 VOLS.push({id: uid, peer_id: pack.peer_id});
                 console.log(VOLS)
                 response = 'hello';
             } break;
             case 'getFreeVOL': {
                 console.log(VOLS)
-                if (VOLS.length == 0) return withResponse(ws, pack.query, 'Нет свободных волонтеров.');
+                if (VOLS.length == 0) return withResponse(ws, pack.hash, 'Нет свободных волонтеров.');
                 response = VOLS[0];
             } break;
             case 'spacepen': {
@@ -735,12 +754,12 @@ wss.on('connection', function(ws) {
                         let penid = pack.penid,
                             members = pack.members,
                             pens = PENS[penid];
-                        if (!pens) return withResponse(ws, pack.query, 'Pen не существует.');
+                        if (!pens) return withResponse(ws, pack.hash, 'Pen не существует.');
 
                         let ind = pens.members.findIndex(e => e.id == uid);
                         if (ind == -1) return;
                         let member = pens.members[ind];
-                        if (!member.permissions.invite) return withResponse(ws, pack.query, 'У вас нет прав на приглашение в этот Pen.');
+                        if (!member.permissions.invite) return withResponse(ws, pack.hash, 'У вас нет прав на приглашение в этот Pen.');
 
                         members.forEach(async (e) => {
                             let mem = await selectUser('id', e);
@@ -762,7 +781,7 @@ wss.on('connection', function(ws) {
                             member = pack.memberid,
                             options = pack.options,
                             pens = PENS[penid];
-                        if (!pens) return withResponse(ws, pack.query, 'Pen не существует.');
+                        if (!pens) return withResponse(ws, pack.hash, 'Pen не существует.');
                         pens.updateMember(uid, member, options);
                     } break;
                     case 'disconnect': {
@@ -809,11 +828,11 @@ wss.on('connection', function(ws) {
                         await updateMe(USERS[uid]); // Sync user data with real data
                         let user = USERS[uid],
                             ind = user.activities.findIndex(i => (i.activity == ACTIVITY_SPACEPEN && i.id == penid && i.password == password));
-                        if (ind == -1) return withResponse(ws, pack.query, 'У Вас нет прав вступать в этот Pen.');
+                        if (ind == -1) return withResponse(ws, pack.hash, 'У Вас нет прав вступать в этот Pen.');
                         let row = await pen.findOne({
                             where: {id: penid, password}
                         });
-                        if (row === null) return withResponse(ws, pack.query, 'Pen не существует.');
+                        if (row === null) return withResponse(ws, pack.hash, 'Pen не существует.');
                         if (!pens) {
                             pens = new Pen(penid);
                             await pens.sync(true); // Create a new Pen from database
@@ -831,7 +850,7 @@ wss.on('connection', function(ws) {
                         if (ind == -1) return;
                         let member = pens.members[ind];
 
-                        if (!member.permissions.edit) return withResponse(ws, pack.query, 'У вас нет прав на редактирование этого Pen.');
+                        if (!member.permissions.edit) return withResponse(ws, pack.hash, 'У вас нет прав на редактирование этого Pen.');
                         pens.update(action, data);
                     } break;
                 }
